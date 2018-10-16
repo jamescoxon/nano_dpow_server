@@ -268,6 +268,9 @@ class Work(tornado.web.RequestHandler):
 
 class WSHandler(tornado.websocket.WebSocketHandler):
 
+    def __repr__(self):
+        return 'busy' if self in wss_work else 'free'
+
     def validate_work(self, hash, work):
      	get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
      	r = requests.post(rai_node_address, data = get_validation)
