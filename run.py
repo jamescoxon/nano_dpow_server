@@ -133,15 +133,19 @@ class Work(tornado.web.RequestHandler):
                 print_time("Open Block")
                 account = yield self.account_xrb(hash)
                 raise gen.Return(account)
+            else: # other errors, for instance invalid hash
+                raise gen.Return('Error')
         else:
                 raise gen.Return('Error')
 
     @gen.coroutine
     def validate_work(self, hash, work):
-     	get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
-     	r = requests.post(rai_node_address, data = get_validation)
-     	resulting_validation = r.json()
-     	raise gen.Return(resulting_validation['valid'])
+        get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
+        r = requests.post(rai_node_address, data = get_validation)
+        resulting_validation = r.json()
+        if 'error' in resulting_validation:
+            raise gen.Return('Error in validation: {}'.format(resulting_validation))
+        raise gen.Return(resulting_validation['valid'])
 
     @gen.coroutine
     def wsSend(self, message):
@@ -173,9 +177,8 @@ class Work(tornado.web.RequestHandler):
 
     	#2 While we wait lets setup the db entries
         account = yield self.get_account_from_hash(hash)
-        #print_time(account)
         if account == 'Error':
-            result = '("status" : "error"}'
+            result = '{"status" : "bad hash"}'
             raise gen.Return(result)
 
         else:
@@ -270,6 +273,8 @@ class Work(tornado.web.RequestHandler):
             return_json = work_output
         elif work_output == '{"status" : "no clients"}':
             return_json = work_output
+        elif work_output == '{"status" : "bad hash"}':
+            return_json = work_output
         else:
             return_json = '{"work" :"%s"}' % work_output
 
@@ -283,10 +288,12 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                                        state = 'busy' if self in wss_work else 'free')
 
     def validate_work(self, hash, work):
-     	get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
-     	r = requests.post(rai_node_address, data = get_validation)
-     	resulting_validation = r.json()
-     	return resulting_validation['valid']
+        get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
+        r = requests.post(rai_node_address, data = get_validation)
+        resulting_validation = r.json()
+        if 'error' in resulting_validation:
+            raise gen.Return('Error in validation: {}'.format(resulting_validation))
+        return resulting_validation['valid']
 
     def open(self):
         global worker_counter
@@ -342,15 +349,18 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
                   #Remove from work list
                   if self in wss_work:
-                      print_time("Removing %s from wss_work" % self)
+                      print_time("Removing {} from wss_work".format(self))
                       wss_work.remove(self)
 
 
               else:
                   print_time("failed")
 
-        except:
-            print_time("error")
+        except Exception as e:
+            print_time("Error {}".format(e))
+            if self in wss_work:
+                print_time("Removing {} from wss_work after a failure".format(self))
+                wss_work.remove(self)
 
     def on_close(self):
         print_time ('Worker disconnected - {}'.format(self.id))
@@ -377,8 +387,9 @@ def push_precache():
         print_time("Got work to push")
         random.shuffle(wss_precache)
         print_lists(work=1,precache=1)
+        hash_handled = False
         for work_clients in wss_precache:
-#            print_time("Sending via WS Precache")
+            print_time("Sending via WS Precache")
             try:
                 if not work_clients.ws_connection.stream.socket:
                     print_time ("Web socket does not exist anymore!!!")
@@ -392,19 +403,25 @@ def push_precache():
                             wss_work.append(work_clients)
                             try:
                                 hash_to_precache.remove(hash)
+                                hash_handled = True
                             except:
                                 print_time("Failed to remove hash from precache list")
                                 pass
                             break
   #                  else:
  #                           print_time(str(work_clients) + " already in use")
-            except:
+            except Exception as e:
+                    print('When sending via WS precache: {}'.format(e))
                     try:
                         wss_precache.remove(work_clients)
                         wss_work.remove(work_clients)
                         break
                     except:
                         pass
+        if hash_handled:
+            print_time("Hash was given to a precache client")
+        else:
+            print_time("Precache not handled - no free workers?")
 
  #   print_time("Work Count: %d, Hash Count: %d" % (hash_count, work_count))
     #tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=5), push_precache)
@@ -460,6 +477,7 @@ def precache_update():
          pass
 
     print_time("Count: %d, Work: %d, Up to date:  %d, Not in queue: %d, Not up to date: %d, Delete error: %d" % ( count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
+    print_lists(work=1,precache=1,demand=1)
     #tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=60), precache_update)
 
 @gen.coroutine
