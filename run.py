@@ -354,12 +354,9 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def on_close(self):
         print_time ('Worker disconnected - {}'.format(self.id))
-        if self in wss_demand:
-            wss_demand.remove(self)
-            try:
-                wss_work.remove(self)
-            except:
-                pass
+        for l in [wss_work, wss_demand, wss_precache]:
+            if self in l:
+                l.remove(self)
 
     def check_origin(self, origin):
         return True
