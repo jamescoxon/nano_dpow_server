@@ -102,7 +102,13 @@ class Work(tornado.web.RequestHandler):
 
     @gen.coroutine
     def get_account_from_hash(self, hash):
+        get_block = '{ "action" : "block", "hash" : "%s"}' % hash
+        print(get_block)
+        r = requests.post(rai_node_address, data = get_block)
+        print_time(r.text)
+
         get_account = '{ "action" : "block_account", "hash" : "%s"}' % hash
+        print(get_account)
         r = requests.post(rai_node_address, data = get_account)
         print_time(r.text)
 
@@ -153,7 +159,7 @@ class Work(tornado.web.RequestHandler):
         conn = yield connection
 
         #1 Send request to websocket clients to process
-        send_result = yield self.wsSend('{"hash" : "%s", "type":"urgent"}' % hash)
+        send_result = yield self.wsSend('{"hash" : "%s", "type" : "urgent"}' % hash)
 
     	#2 While we wait lets setup the db entries
         account = yield self.get_account_from_hash(hash)
@@ -167,7 +173,7 @@ class Work(tornado.web.RequestHandler):
             print_time("Account %s" % account)
             data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).run(conn)
             while (yield data.fetch_next()):
-                if send_result == '{"status":"failed"}':
+                if send_result == '{"status" : "failed"}':
                     result = '{"status" : "no clients"}'
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update({"hash" : hash, "work": "0"}).run(conn)
                     raise gen.Return(result)
@@ -175,7 +181,7 @@ class Work(tornado.web.RequestHandler):
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update({"hash" : hash, "work": "1"}).run(conn)
                     break
             else:
-                if send_result == '{"status":"failed"}':
+                if send_result == '{"status" : "failed"}':
                     result = '{"status" : "no clients"}'
                     yield rethinkdb.db("pow").table("hashes").insert({"account":account, "hash":hash, "work":"1"}).run(conn)
                     raise gen.Return(result)
@@ -432,6 +438,11 @@ def precache_update():
                  hash_to_precache.append(user['hash'])
              yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update({"work": "0", "hash": results['frontier']}).run(conn)
      except:
+         get_account = '{ "action" : "block_account", "hash" : "%s"}' % user['hash']
+         print(get_account)
+         r = requests.post(rai_node_address, data = get_account)
+         print_time(r.text)
+
          delete_error = delete_error + 1
          print_time("Error - deleting %s" % user['id'])
          yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
