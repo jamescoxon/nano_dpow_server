@@ -54,11 +54,22 @@ wss_precache = []
 wss_work = []
 hash_to_precache = []
 
+worker_counter = 0
+
 rethinkdb.set_loop_type("tornado")
 connection = rethinkdb.connect( "localhost", 28015)
 
 def print_time(message):
     print(time.strftime("%d/%m/%Y %H:%M:%S") + " " + str(message))
+
+def print_lists(work=False, demand=False, precache=False):
+    if not(work or demand or precache): return
+    s = "State of lists:"
+    if work: s += "\n\t\t\twss_work: {}".format(wss_work)
+    if demand: s += "\n\t\t\twss_demand: {}".format(wss_demand)
+    if precache: s += "\n\t\t\twss_precache: {}".format(wss_precache)
+    print_time(s)
+
 
 class Work(tornado.web.RequestHandler):
     @gen.coroutine
@@ -137,8 +148,7 @@ class Work(tornado.web.RequestHandler):
         print_time("Sending via WS Demand")
         #randomise our wss list then cycle through until we manage to send a message
         random.shuffle(wss_demand)
-        print_time(wss_demand)
-        print_time(wss_work)
+        print_lists(work=1,demand=1)
 
         for ws in wss_demand:
             if not ws.ws_connection.stream.socket:
@@ -269,7 +279,8 @@ class Work(tornado.web.RequestHandler):
 class WSHandler(tornado.websocket.WebSocketHandler):
 
     def __repr__(self):
-        return 'busy' if self in wss_work else 'free'
+        return '{id} ({state})'.format(id = self.id or '?',
+                                       state = 'busy' if self in wss_work else 'free')
 
     def validate_work(self, hash, work):
      	get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
@@ -278,10 +289,13 @@ class WSHandler(tornado.websocket.WebSocketHandler):
      	return resulting_validation['valid']
 
     def open(self):
-        print_time ('new connection')
+        global worker_counter
+        worker_counter += 1
+        self.id = worker_counter
+        print_time ('New worker connected - {}'.format(self.id))
         if self not in wss_demand:
             wss_demand.append(self)
-        print_time(self)
+        #print_time(self)
 
     @gen.coroutine
     def on_message(self, message):
@@ -292,7 +306,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
             ws_data = json.loads(message)
 
             if 'work_type' in ws_data:
-                print_time("Found work_type")
+                print_time("Found work_type -> {}".format(ws_data['work_type']))
                 if ws_data['work_type'] == 'any':
                     #Add to both demand and precache
                     #wss_demand.append(self)
@@ -339,7 +353,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
             print_time("error")
 
     def on_close(self):
-        print_time ('connection closed')
+        print_time ('Worker disconnected - {}'.format(self.id))
         if self in wss_demand:
             wss_demand.remove(self)
             try:
@@ -363,12 +377,9 @@ def push_precache():
 #    print_time(hash_to_precache)
     for hash in hash_to_precache:
         hash_count = hash_count + 1
-#        print_time("Got work to push")
-#        print_time(wss_precache)
-#        print_time(wss_work)
+        print_time("Got work to push")
         random.shuffle(wss_precache)
-        print_time(wss_precache)
-        print_time(wss_work)
+        print_lists(work=1,precache=1)
         for work_clients in wss_precache:
 #            print_time("Sending via WS Precache")
             try:
