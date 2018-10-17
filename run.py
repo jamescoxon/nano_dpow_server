@@ -33,6 +33,8 @@ import time
 import argparse
 import random
 import rethinkdb
+from enum import Enum
+
 # import datetime
 # from tornado.concurrent import Future, chain_future
 
@@ -40,6 +42,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--rai_node_uri", help='rai_nodes uri, usually 127.0.0.1', default='127.0.0.1')
 parser.add_argument("--rai_node_port", help='rai_node port, usually 7076', default='7076')
 parser.add_argument("--internal_port", help='internal port which nginx proxys', default='5000')
+parser.add_argument("-v", "--verbose", help='more prints to help debugging', action='store_true')
 
 args = parser.parse_args()
 
@@ -54,6 +57,12 @@ worker_counter = 0
 
 rethinkdb.set_loop_type("tornado")
 connection = rethinkdb.connect("localhost", 28015)
+
+
+def print_time_debug(message):
+    if args.verbose:
+        print("(DEBUG)", end=' ')
+        print_time(message)
 
 
 def print_time(message):
@@ -73,6 +82,11 @@ def print_lists(work=False, demand=False, precache=False):
     print_time(s)
 
 
+class WorkState(Enum):
+    needs = "0"
+    doing = "1"
+
+
 class Work(tornado.web.RequestHandler):
     def data_received(self, chunk):
         pass
@@ -82,16 +96,12 @@ class Work(tornado.web.RequestHandler):
         raise gen.Return(nano.hex_to_account(hex_acc))
 
     @gen.coroutine
-    def get_account_from_hash(self, hash):
-        get_block = '{ "action" : "block", "hash" : "%s"}' % hash
-        print(get_block)
-        r = requests.post(rai_node_address, data=get_block)
-        print_time(r.text)
+    def get_account_from_hash(self, hash_hex):
 
-        get_account = '{ "action" : "block_account", "hash" : "%s"}' % hash
-        print(get_account)
+        get_account = '{ "action" : "block_account", "hash" : "%s"}' % hash_hex
+        print_time_debug("action block_account request:\n{}".format(get_account))
         r = requests.post(rai_node_address, data=get_account)
-        print_time(r.text)
+        print_time_debug("action block_account response:\n{}".format(r.text))
 
         resulting_data = r.json()
         if 'account' in resulting_data:
@@ -101,7 +111,8 @@ class Work(tornado.web.RequestHandler):
             if resulting_data['error'] == 'Block not found':
                 # This maybe a public key for an Open Block, convert to xrb address
                 print_time("Open Block")
-                account = yield self.account_xrb(hash)
+                account = yield self.account_xrb(hash_hex)
+                print_time("The account is {}".format(account))
                 raise gen.Return(account)
             else:  # other errors, for instance invalid hash
                 raise gen.Return('Error')
@@ -139,51 +150,50 @@ class Work(tornado.web.RequestHandler):
         return '{"status":"failed"}'
 
     @gen.coroutine
-    def get_work_via_ws(self, hash):
+    def get_work_via_ws(self, hash_hex):
         conn = yield connection
 
-        # 1 Send request to websocket clients to process
-        send_result = yield self.wsSend('{"hash" : "%s", "type" : "urgent"}' % hash)
-
-        # 2 While we wait lets setup the db entries
-        account = yield self.get_account_from_hash(hash)
+        # 1 Get account to setup DB entries and check if invalid hash
+        account = yield self.get_account_from_hash(hash_hex)
         if account == 'Error':
             result = '{"status" : "bad hash"}'
             raise gen.Return(result)
 
-        else:
-            # Check for previous account
-            print_time("Account %s" % account)
-            data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).run(conn)
-            while (yield data.fetch_next()):
-                if send_result == '{"status" : "failed"}':
-                    result = '{"status" : "no clients"}'
-                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
-                        {"hash": hash, "work": "0"}).run(conn)
-                    raise gen.Return(result)
-                else:
-                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
-                        {"hash": hash, "work": "1"}).run(conn)
-                    break
+        # 2 Send request to websocket clients to process
+        send_result = yield self.wsSend('{"hash" : "%s", "type" : "urgent"}' % hash_hex)
+
+        # Check for previous account
+        print_time("Account %s" % account)
+        data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).run(conn)
+        while (yield data.fetch_next()):
+            if send_result == '{"status" : "failed"}':
+                result = '{"status" : "no clients"}'
+                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
+                    {"hash": hash_hex, "work": WorkState.needs.value}).run(conn)
+                raise gen.Return(result)
             else:
-                if send_result == '{"status" : "failed"}':
-                    result = '{"status" : "no clients"}'
-                    yield rethinkdb.db("pow").table("hashes").insert(
-                        {"account": account, "hash": hash, "work": "1"}).run(conn)
-                    raise gen.Return(result)
-                else:
-                    yield rethinkdb.db("pow").table("hashes").insert(
-                        {"account": account, "hash": hash, "work": "1"}).run(conn)
+                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
+                    {"hash": hash_hex, "work": WorkState.doing.value}).run(conn)
+                break
+        else:
+            if send_result == '{"status" : "failed"}':
+                result = '{"status" : "no clients"}'
+                yield rethinkdb.db("pow").table("hashes").insert(
+                    {"account": account, "hash": hash_hex, "work": WorkState.doing.value}).run(conn)
+                raise gen.Return(result)
+            else:
+                yield rethinkdb.db("pow").table("hashes").insert(
+                    {"account": account, "hash": hash_hex, "work": WorkState.doing.value}).run(conn)
 
         x = 0
         print_time("Waiting for work...")
         while x < 20:
             #            print_time(x)
-            ws_data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash).nth(0).default(
+            ws_data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).nth(0).default(
                 False).run(conn)
-            if ws_data != False:
+            if ws_data:
                 new_work = ws_data
-                if new_work['work'] != "0" and new_work['work'] != "1":
+                if new_work['work'] != WorkState.needs.value and new_work['work'] != WorkState.doing.value:
                     # print_time(new_work['work'])
                     work_output = new_work['work']
                     raise gen.Return(work_output)
@@ -198,19 +208,18 @@ class Work(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self):
         post_data = json.loads(self.request.body.decode('utf-8'))
-        hash = post_data['hash'].upper()
+        hash_hex = post_data['hash'].upper()
         key = ''
-        print_time(hash + " " + key)
+        print_time(hash_hex + " " + key)
 
         conn = yield connection
 
-        work_output = ' '
         # 1 Check key is valid
         if 'key' in post_data:
             print_time("found API key")
             key = post_data['key']
             data = yield rethinkdb.db("pow").table("api_keys").filter({"api_key": key}).nth(0).default(False).run(conn)
-            if data == False:
+            if not data:
                 print_time("incorrect API key")
                 return_json = '{"status" : "incorrect key"}'
                 print_time(return_json)
@@ -228,20 +237,20 @@ class Work(tornado.web.RequestHandler):
             self.write(return_json)
             return
         # 2 Do we have hash in db?
-        data = yield rethinkdb.db("pow").table("hashes").filter({"hash": hash}).nth(0).default(False).run(conn)
+        data = yield rethinkdb.db("pow").table("hashes").filter({"hash": hash_hex}).nth(0).default(False).run(conn)
         #        data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash).nth(0).run(conn)
         #        print_time(data)
-        if data != False:
+        if data:
             precache_work = data
             print_time('Found cached work value %s' % precache_work['work'])
             work_output = precache_work['work']
-            if work_output == "0" or work_output == "1":
-                print_time("Empty Work, get new")
-                work_output = yield self.get_work_via_ws(hash)
+            if work_output == WorkState.needs.value or work_output == WorkState.doing.value:
+                print_time("Empty work, get new")
+                work_output = yield self.get_work_via_ws(hash_hex)
         else:
             # 3 If not then request pow via websockets
-            print_time('Not in db, calculating work...')
-            work_output = yield self.get_work_via_ws(hash)
+            print_time('Not in DB, getting on demand...')
+            work_output = yield self.get_work_via_ws(hash_hex)
 
         # 4 Return work
         if work_output == '{"status" : "timeout"}':
@@ -259,12 +268,20 @@ class Work(tornado.web.RequestHandler):
 
 class WSHandler(tornado.websocket.WebSocketHandler):
 
+    worker_counter = 0
+
+    def __init__(self, *args, **kwargs):
+        WSHandler.worker_counter += 1
+        self.id = WSHandler.worker_counter
+        super().__init__(*args, **kwargs)
+
     def __repr__(self):
         return '{id} ({state})'.format(id=self.id or '?',
                                        state='busy' if self in wss_work else 'free')
 
-    def validate_work(self, hash, work):
-        get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
+    @staticmethod
+    def validate_work(hash_hex, work):
+        get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash_hex, work)
         r = requests.post(rai_node_address, data=get_validation)
         resulting_validation = r.json()
         if 'error' in resulting_validation:
@@ -272,51 +289,50 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         return resulting_validation['valid']
 
     def open(self):
-        global worker_counter
-        worker_counter += 1
-        self.id = worker_counter
         print_time('New worker connected - {}'.format(self.id))
         if self not in wss_demand:
             wss_demand.append(self)
-        # print_time(self)
 
     @gen.coroutine
     def on_message(self, message):
-        message = message
-
-        print_time('message: %s' % message)
+        print_time('Message from worker {}: {}'.format(self.id, message))
         try:
             ws_data = json.loads(message)
 
             if 'work_type' in ws_data:
-                print_time("Found work_type -> {}".format(ws_data['work_type']))
-                if ws_data['work_type'] == 'any':
-                    # Add to both demand and precache
-                    # wss_demand.append(self)
+                # handle setup message for work type
+                work_type = ws_data['work_type']
+                print_time("Found work_type -> {}".format(work_type))
+                try:
+                    self.update_work_type(work_type)
+                except Exception as e:
+                    print_time(e)
+                    print_time('Setting {} to precache'.format(self.id))
                     wss_precache.append(self)
-                elif ws_data['work_type'] == 'precache_only':
-                    # Add to precache and remove from demand
-                    wss_precache.append(self)
-                    wss_demand.remove(self)
-                # If its urgent_only we don't change anything
             else:
-                hash = ws_data['hash'].upper()
+                # handle work message
+                hash_hex = ws_data['hash'].upper()
                 work = ws_data['work']
                 payout_account = ws_data['address'].lower()
                 # insert in to db
 
-                if self.validate_work(hash, work) == "1":
+                if work == 'error':
+                    raise Exception("'Something wrong with the client, work returned as error'")
+                    # TODO probably a good place to give some kind of punishment e.g. 1 minute without getting work
+
+                validation = self.validate_work(hash_hex, work)
+                if validation == WorkState.doing.value:
                     conn = yield connection
-                    print_time("hash " + hash + " work: " + work)
-                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash).update(
+                    print_time("hash " + hash_hex + " work: " + work)
+                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).update(
                         {"work": work}).run(conn)
-                    if hash in hash_to_precache:
-                        hash_to_precache.remove(hash)
+                    if hash_hex in hash_to_precache:
+                        hash_to_precache.remove(hash_hex)
 
                     # Add work record to client database to allow payouts
                     clients_data = yield rethinkdb.db("pow").table("clients").filter(
                         rethinkdb.row['account'] == payout_account).nth(0).default(False).run(conn)
-                    if clients_data != False:
+                    if clients_data:
                         client = clients_data
                         count = int(client['count'])
                         total_count = count + 1
@@ -332,9 +348,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                         print_time("Removing {} from wss_work".format(self))
                         wss_work.remove(self)
 
-
                 else:
-                    print_time("failed")
+                    print_time("Failed to validate work - {}".format(validation))
 
         except Exception as e:
             print_time("Error {}".format(e))
@@ -342,8 +357,28 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 print_time("Removing {} from wss_work after a failure".format(self))
                 wss_work.remove(self)
 
+    def update_work_type(self, work_type):
+        # remove from any lists
+        self.remove_from_lists()
+
+        if work_type in 'any':
+            # Add to both demand and precache
+            wss_demand.append(self)
+            wss_precache.append(self)
+        elif work_type == 'precache_only':
+            # Add to precache
+            wss_precache.append(self)
+        elif work_type == 'urgent':
+            # Add to demand
+            wss_demand.append(self)
+        else:
+            raise Exception('Invalid work type {}'.format(work_type))
+
     def on_close(self):
         print_time('Worker disconnected - {}'.format(self.id))
+        self.remove_from_lists()
+
+    def remove_from_lists(self):
         for l in [wss_work, wss_demand, wss_precache]:
             if self in l:
                 l.remove(self)
@@ -365,11 +400,11 @@ def push_precache():
     #    print_time(hash_to_precache)
     for hash in hash_to_precache:
         hash_count = hash_count + 1
-        print_time("Got work to push")
+        print_time("Got precache work to push")
         random.shuffle(wss_precache)
         print_lists(work=1, precache=1)
         hash_handled = False
-        for work_clients in wss_precache:
+        for work_clients in wss_precache:  # type: WSHandler
             print_time("Sending via WS Precache")
             try:
                 if not work_clients.ws_connection.stream.socket:
@@ -385,20 +420,20 @@ def push_precache():
                         try:
                             hash_to_precache.remove(hash)
                             hash_handled = True
-                        except:
-                            print_time("Failed to remove hash from precache list")
+                        except Exception as e:
+                            print_time("Failed to remove hash from precache list: {}".format(e))
                             pass
                         break
             #                  else:
             #                           print_time(str(work_clients) + " already in use")
             except Exception as e:
-                print('When sending via WS precache: {}'.format(e))
-                try:
+                print_time('Error when sending via WS precache: {}'.format(e))
+                if work_clients in wss_precache:
                     wss_precache.remove(work_clients)
+                    print_time('Client {} removed from precache work'.format(work_clients.id))
+                if work_clients in wss_work:
                     wss_work.remove(work_clients)
-                    break
-                except:
-                    pass
+
         if hash_handled:
             print_time("Hash was given to a precache client")
         else:
@@ -426,17 +461,17 @@ def precache_update():
             get_frontier = '{ "action" : "account_info", "account" : "%s" }' % user['account']
             r = requests.post(rai_node_address, data=get_frontier)
             results = r.json()
-            if user['work'] == "1":
+            if user['work'] == WorkState.doing.value:
                 # Reset work as taken too long
                 work_count = work_count + 1
                 #             print_time("%s : Request too long, reset" % user['account'])
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
-                    {"work": "0"}).run(conn)
+                    {"work": WorkState.needs.value}).run(conn)
                 if user['hash'] not in hash_to_precache:
                     hash_to_precache.append(user['hash'])
             elif results['frontier'] == user['hash']:
                 up_to_date = up_to_date + 1
-                if user['work'] == "0":
+                if user['work'] == WorkState.needs.value:
                     if user['hash'] not in hash_to_precache:
                         not_in_queue = not_in_queue + 1
                         #                     print_time('hash not in queue, adding')
@@ -448,8 +483,9 @@ def precache_update():
                 if user['hash'] not in hash_to_precache:
                     hash_to_precache.append(user['hash'])
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
-                    {"work": "0", "hash": results['frontier']}).run(conn)
-        except:
+                    {"work": WorkState.needs.value, "hash": results['frontier']}).run(conn)
+        except Exception as e:
+            print_time_debug(e)
             get_account = '{ "action" : "block_account", "hash" : "%s"}' % user['hash']
             print(get_account)
             r = requests.post(rai_node_address, data=get_account)
@@ -460,20 +496,20 @@ def precache_update():
             yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
             pass
 
-    print_time("Count: %d, Work: %d, Up to date:  %d, Not in queue: %d, Not up to date: %d, Delete error: %d" % (
-    count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
+    print_time("Count: {:d}, Work: {:d}, Up to date:  {:d}, Not in queue: {:d}, Not up to date: {:d}, Delete error: {:d}".format(
+                count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
     print_lists(work=1, precache=1, demand=1)
     # tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=60), precache_update)
 
 
 @gen.coroutine
-def setupdb():
+def setup_db():
     print_time("Update DB")
     conn = yield connection
     data = yield rethinkdb.db("pow").table("hashes").run(conn)
     while (yield data.fetch_next()):
         documents = yield data.next()
-        if documents['work'] == "0":
+        if documents['work'] == WorkState.needs.value:
             if documents['hash'] not in hash_to_precache:
                 hash_to_precache.append(documents['hash'])
 
@@ -483,7 +519,7 @@ if __name__ == "__main__":
     http_server.listen(int(args.internal_port))
     myIP = socket.gethostbyname(socket.gethostname())
 
-    tornado.ioloop.IOLoop.current().run_sync(setupdb)
+    tornado.ioloop.IOLoop.current().run_sync(setup_db)
 
     print_time('*** Websocket Server Started at %s***' % myIP)
     #    main_loop.add_timeout(datetime.timedelta(seconds=10), precache_update)
@@ -495,4 +531,7 @@ if __name__ == "__main__":
     # tornado.ioloop.IOLoop.instance().start()
     main_loop = tornado.ioloop.IOLoop.instance()
 
-    main_loop.start()
+    try:
+        main_loop.start()
+    except KeyboardInterrupt:
+        pass
