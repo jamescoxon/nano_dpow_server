@@ -1,6 +1,27 @@
 from bitstring import BitArray
 from pyblake2 import blake2b
 
+# This is the base threshold
+NANO_DIFFICULTY = 0xffffffc000000000
+
+# Banano is lower
+BANANO_DIFFICULTY = 0xfffffe0000000000
+
+
+def threshold_multiplier(base_difficulty: int, multiplier: float) -> int:
+    # to get the multiplier, you usually do (e.g. banano):
+    #     1.0 / (((1 << 64) - BANANO_DIFFICULTY) / ((1 << 64) - NANO_DIFFICULTY))
+    # easy to get the new difficulty out of that given a multiplier
+    return int((base_difficulty - (1 << 64)) / multiplier + (1 << 64))
+
+
+# tests
+assert(threshold_multiplier(NANO_DIFFICULTY, 0.125) == BANANO_DIFFICULTY)
+
+
+def threshold_to_str(th):
+    return hex(th)[2:]
+
 
 def hex_to_account(hex_acc: str) -> (str, str):
     """

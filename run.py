@@ -58,7 +58,6 @@ worker_counter = 0
 rethinkdb.set_loop_type("tornado")
 connection = rethinkdb.connect("localhost", 28015)
 
-
 def print_time_debug(message):
     if args.verbose:
         print("(DEBUG)", end=' ')
@@ -120,16 +119,7 @@ class Work(tornado.web.RequestHandler):
             raise gen.Return('Error')
 
     @gen.coroutine
-    def validate_work(self, hash, work):
-        get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash, work)
-        r = requests.post(rai_node_address, data=get_validation)
-        resulting_validation = r.json()
-        if 'error' in resulting_validation:
-            raise gen.Return('Error in validation: {}'.format(resulting_validation))
-        raise gen.Return(resulting_validation['valid'])
-
-    @gen.coroutine
-    def wsSend(self, message):
+    def ws_demand(self, message):
         print_time("Sending via WS Demand")
         # randomise our wss list then cycle through until we manage to send a message
         random.shuffle(wss_demand)
@@ -153,14 +143,20 @@ class Work(tornado.web.RequestHandler):
     def get_work_via_ws(self, hash_hex):
         conn = yield connection
 
-        # 1 Get account to setup DB entries and check if invalid hash
+        # Get account to setup DB entries and check if invalid hash
         account = yield self.get_account_from_hash(hash_hex)
         if account == 'Error':
             result = '{"status" : "bad hash"}'
             raise gen.Return(result)
 
-        # 2 Send request to websocket clients to process
-        send_result = yield self.wsSend('{"hash" : "%s", "type" : "urgent"}' % hash_hex)
+        # Get appropriate threshold value
+        # TODO after prioritization PoW is implemented, calculate here an appropriate multiplier
+        multiplier = 1.0
+        threshold = nano.threshold_multiplier(nano.NANO_DIFFICULTY, multiplier)
+        threshold_str = nano.threshold_to_str(threshold)
+
+        # Send request to websocket clients to process
+        send_result = yield self.ws_demand('{"hash" : "%s", "type" : "urgent", "threshold" : "%s"}' % (hash_hex,threshold_str))
 
         # Check for previous account
         print_time("Account %s" % account)
@@ -169,28 +165,27 @@ class Work(tornado.web.RequestHandler):
             if send_result == '{"status" : "failed"}':
                 result = '{"status" : "no clients"}'
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
-                    {"hash": hash_hex, "work": WorkState.needs.value}).run(conn)
+                    {"hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
                 raise gen.Return(result)
             else:
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
-                    {"hash": hash_hex, "work": WorkState.doing.value}).run(conn)
+                    {"hash": hash_hex, "work": WorkState.doing.value, "threshold": threshold_str}).run(conn)
                 break
         else:
             if send_result == '{"status" : "failed"}':
                 result = '{"status" : "no clients"}'
                 yield rethinkdb.db("pow").table("hashes").insert(
-                    {"account": account, "hash": hash_hex, "work": WorkState.doing.value}).run(conn)
+                    {"account": account, "hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
                 raise gen.Return(result)
             else:
                 yield rethinkdb.db("pow").table("hashes").insert(
-                    {"account": account, "hash": hash_hex, "work": WorkState.doing.value}).run(conn)
+                    {"account": account, "hash": hash_hex, "work": WorkState.doing.value, "threshold": threshold_str}).run(conn)
 
         x = 0
         print_time("Waiting for work...")
         while x < 20:
             #            print_time(x)
-            ws_data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).nth(0).default(
-                False).run(conn)
+            ws_data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).nth(0).default(False).run(conn)
             if ws_data:
                 new_work = ws_data
                 if new_work['work'] != WorkState.needs.value and new_work['work'] != WorkState.doing.value:
@@ -208,9 +203,13 @@ class Work(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self):
         post_data = json.loads(self.request.body.decode('utf-8'))
-        hash_hex = post_data['hash'].upper()
-        key = ''
-        print_time(hash_hex + " " + key)
+        if 'hash' in post_data:
+            hash_hex = post_data['hash'].upper()
+        else:
+            return_json = '{"status" : "no hash"}'
+            print_time(return_json)
+            self.write(return_json)
+            return
 
         conn = yield connection
 
@@ -280,8 +279,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                                        state='busy' if self in wss_work else 'free')
 
     @staticmethod
-    def validate_work(hash_hex, work):
-        get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s" }' % (hash_hex, work)
+    def validate_work(hash_hex, work, threshold):
+        get_validation = '{ "action" : "work_validate", "hash" : "%s", "work": "%s", "threshold": "%s" }' % (hash_hex, work, threshold)
         r = requests.post(rai_node_address, data=get_validation)
         resulting_validation = r.json()
         if 'error' in resulting_validation:
@@ -318,12 +317,20 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
                 if work == 'error':
                     raise Exception("'Something wrong with the client, work returned as error'")
-                    # TODO probably a good place to give some kind of punishment e.g. 1 minute without getting work
 
-                validation = self.validate_work(hash_hex, work)
+                # check the threshold at which this was computed
+                # defaults to NANO_DIFFICULTY if not found (e.g. early entries in DB)
+                conn = yield connection
+                data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).nth(0).default(False).run(conn)
+                if data:
+                    threshold_str = data.get("threshold") or nano.threshold_to_str(nano.NANO_DIFFICULTY)
+                else:
+                    threshold_str = nano.threshold_to_str(nano.NANO_DIFFICULTY)
+                print_time_debug("Validating hash {},  work {}, threshold {}".format(hash_hex, work, threshold_str))
+
+                # validate the work from client
+                validation = self.validate_work(hash_hex, work, threshold_str)
                 if validation == WorkState.doing.value:
-                    conn = yield connection
-                    print_time("hash " + hash_hex + " work: " + work)
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).update(
                         {"work": work}).run(conn)
                     if hash_hex in hash_to_precache:
@@ -349,12 +356,13 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                         wss_work.remove(self)
 
                 else:
-                    print_time("Failed to validate work - {}".format(validation))
+                    raise Exception("Failed to validate work - {} for worker {}".format(validation, self))
 
         except Exception as e:
+            # TODO probably a good place to give some kind of punishment e.g. 1 minute without getting work
             print_time("Error {}".format(e))
             if self in wss_work:
-                print_time("Removing {} from wss_work after a failure".format(self))
+                print_time("Removing {} from wss_work after exception".format(self))
                 wss_work.remove(self)
 
     def update_work_type(self, work_type):
@@ -398,7 +406,14 @@ def push_precache():
     hash_count = 0
     work_count = 0
     #    print_time(hash_to_precache)
-    for hash in hash_to_precache:
+
+    # Get appropriate threshold value
+    # TODO what is a good threshold value for precaching?
+    multiplier = 1.0
+    threshold = nano.threshold_multiplier(nano.NANO_DIFFICULTY, multiplier)
+    threshold_str = nano.threshold_to_str(threshold)
+
+    for hash_hex in hash_to_precache:
         hash_count = hash_count + 1
         print_time("Got precache work to push")
         random.shuffle(wss_precache)
@@ -414,11 +429,12 @@ def push_precache():
                 else:
                     if work_clients not in wss_work:
                         work_count = work_count + 1
-                        message = '{"hash" : "%s", "type" : "precache"}' % hash
+                        message = '{"hash" : "%s", "type" : "precache", "threshold" : "%s"}' % (hash_hex, threshold_str)
                         work_clients.write_message(message)
                         wss_work.append(work_clients)
+                        print_time_debug(message)
                         try:
-                            hash_to_precache.remove(hash)
+                            hash_to_precache.remove(hash_hex)
                             hash_handled = True
                         except Exception as e:
                             print_time("Failed to remove hash from precache list: {}".format(e))
