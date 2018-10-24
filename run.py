@@ -304,10 +304,10 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 print_time("Found work_type -> {}".format(work_type))
                 try:
                     self.update_work_type(work_type)
+                    self.write_message('{"status": "success"}')
                 except Exception as e:
                     print_time(e)
-                    print_time('Setting {} to precache'.format(self.id))
-                    wss_precache.append(self)
+                    self.write_message('{"status": "error", "description": "%s"}' % e)
             else:
                 # handle work message
                 hash_hex = ws_data['hash'].upper()
@@ -369,7 +369,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         # remove from any lists
         self.remove_from_lists()
 
-        if work_type in 'any':
+        if work_type == 'any':
             # Add to both demand and precache
             wss_demand.append(self)
             wss_precache.append(self)
