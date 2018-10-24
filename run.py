@@ -376,7 +376,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         elif work_type == 'precache_only':
             # Add to precache
             wss_precache.append(self)
-        elif work_type == 'urgent':
+        elif work_type == 'urgent_only':
             # Add to demand
             wss_demand.append(self)
         else:
