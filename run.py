@@ -33,6 +33,7 @@ import time
 import argparse
 import random
 import rethinkdb
+import hashlib
 from enum import Enum
 
 # import datetime
@@ -217,7 +218,8 @@ class Work(tornado.web.RequestHandler):
         if 'key' in post_data:
             print_time("found API key")
             key = post_data['key']
-            data = yield rethinkdb.db("pow").table("api_keys").filter({"api_key": key}).nth(0).default(False).run(conn)
+            key_hashed = hashlib.sha512(key.encode('utf-8')).hexdigest()
+            data = yield rethinkdb.db("pow").table("api_keys").filter({"api_key": key_hashed}).nth(0).default(False).run(conn)
             if not data:
                 print_time("incorrect API key")
                 return_json = '{"status" : "incorrect key"}'
@@ -227,7 +229,7 @@ class Work(tornado.web.RequestHandler):
             else:
                 print_time("Correct API key from %s - continue" % data['username'])
                 new_count = int(data['count']) + 1
-                yield rethinkdb.db("pow").table("api_keys").filter(rethinkdb.row['api_key'] == key).update(
+                yield rethinkdb.db("pow").table("api_keys").filter(rethinkdb.row['api_key'] == key_hashed).update(
                     {"count": new_count}).run(conn)
         else:
             print_time("no API key")
