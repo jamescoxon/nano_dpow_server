@@ -10,7 +10,7 @@ BANANO_DIFFICULTY = 0xfffffe0000000000
 
 def threshold_multiplier(base_difficulty: int, multiplier: float) -> int:
     # to get the multiplier, you usually do (e.g. banano):
-    #     1.0 / (((1 << 64) - BANANO_DIFFICULTY) / ((1 << 64) - NANO_DIFFICULTY))
+    #     ((1 << 64) - NANO_DIFFICULTY)) / (((1 << 64) - BANANO_DIFFICULTY)
     # easy to get the new difficulty out of that given a multiplier
     return int((base_difficulty - (1 << 64)) / multiplier + (1 << 64))
 
