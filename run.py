@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import nanoutils
+import nanoutils as nano
 import tornado.httpserver
 import tornado.websocket
 import tornado.ioloop
