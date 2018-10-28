@@ -287,7 +287,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         resulting_validation = r.json()
         if 'error' in resulting_validation:
             raise gen.Return('Error in validation: {}'.format(resulting_validation))
-        return resulting_validation['valid']
+        return int(resulting_validation['valid'])
 
     def open(self):
         print_time('New worker connected - {}'.format(self.id))
@@ -331,8 +331,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 print_time_debug("Validating hash {},  work {}, threshold {}".format(hash_hex, work, threshold_str))
 
                 # validate the work from client
-                validation = self.validate_work(hash_hex, work, threshold_str)
-                if validation == WorkState.doing.value:
+                valid = self.validate_work(hash_hex, work, threshold_str)
+                if valid:
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).update(
                         {"work": work}).run(conn)
                     if hash_hex in hash_to_precache:
