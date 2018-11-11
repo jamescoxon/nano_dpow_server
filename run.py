@@ -315,7 +315,6 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 hash_hex = ws_data['hash'].upper()
                 work = ws_data['work']
                 payout_account = ws_data['address'].lower()
-                # insert in to db
 
                 if work == 'error':
                     raise Exception("'Something wrong with the client, work returned as error'")
@@ -504,15 +503,39 @@ def precache_update():
                     {"work": WorkState.needs.value, "hash": results['frontier']}).run(conn)
         except Exception as e:
             print_time_debug(e)
-            get_account = '{ "action" : "block_account", "hash" : "%s"}' % user['hash']
-            print(get_account)
-            r = requests.post(rai_node_address, data=get_account)
-            print_time(r.text)
+            print_time('Checking to see if it is a case of a mistaken open block')
 
-            delete_error = delete_error + 1
-            print_time("Error - deleting %s" % user['id'])
-            yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
-            pass
+            # In this error, perhaps the system mistakenly added as an open block, when the node simply didn't have that block yet.
+            # in that case, the next RPC will return a valid account now, and not error
+            get_account = '{ "action" : "block_account", "hash" : "%s"}' % user['hash']
+            r = requests.post(rai_node_address, data=get_account)
+            account_data = r.json()
+
+            if 'account' in account_data:
+                print_time('Found an account for a new account, deleting last entry and setting up another for precache')
+
+                print_time("Deleting %s" % user['id'])
+                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
+
+                # Add to precache
+
+                # Get appropriate threshold value
+                # TODO what is a good threshold value for precaching?
+                multiplier = 1.0
+                threshold = nano.threshold_multiplier(nano.NANO_DIFFICULTY, multiplier)
+                threshold_str = nano.threshold_to_str(threshold)
+
+                yield rethinkdb.db("pow").table("hashes").insert(
+                    {"account": account_data['account'], "hash": user['hash'], "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
+
+                hash_to_precache.append(user['hash'])
+
+            else:  # 'error' or otherwise:
+                print_time('Still no valid account, deleting entry completely from DB')
+                delete_error = delete_error + 1
+                print_time("Deleting %s" % user['id'])
+                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
+
 
     print_time("Count: {:d}, Work: {:d}, Up to date:  {:d}, Not in queue: {:d}, Not up to date: {:d}, Delete error: {:d}".format(
                 count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
