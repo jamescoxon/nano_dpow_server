@@ -303,6 +303,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         print_time('Message from worker {}: {}'.format(self.id, message))
         try:
             ws_data = json.loads(message)
+            if 'address' not in ws_data:
+                return
 
             if 'work_type' in ws_data:
                 # handle setup message for work type
@@ -320,6 +322,9 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                         print_time(e)
                     #self.write_message('{"status": "error", "description": "%s"}' % e)
             else:
+                if 'hash' not in ws_data or 'work' not in ws_data:
+                    return
+
                 # handle work message
                 hash_hex = ws_data['hash'].upper()
                 work = ws_data['work']
