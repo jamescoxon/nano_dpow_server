@@ -304,7 +304,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         try:
             ws_data = json.loads(message)
             if 'address' not in ws_data:
-                return
+                raise Exception('Incorrect data from client: {}'.format(ws_data))
 
             if 'work_type' in ws_data:
                 # handle setup message for work type
@@ -323,7 +323,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     #self.write_message('{"status": "error", "description": "%s"}' % e)
             else:
                 if 'hash' not in ws_data or 'work' not in ws_data:
-                    return
+                    raise Exception('Incorrect data from client: {}'.format(ws_data))
 
                 # handle work message
                 hash_hex = ws_data['hash'].upper()
@@ -388,6 +388,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 work_tracker.pop(hash_hex)
             except KeyError:
                 print_time("Error - tried to remove hash but it was no longer in work_tracker: {}".format(hash_hex))
+            except UnboundLocalError:  # there was no hash
+                pass
 
     def update_work_type(self, work_type):
         # remove from any lists
