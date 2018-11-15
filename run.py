@@ -295,8 +295,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def open(self):
         print_time('New worker connected - {}'.format(self.id))
-        if self not in wss_demand:
-            wss_demand.append(self)
+#        if self not in wss_demand:
+#            wss_demand.append(self)
 
     @gen.coroutine
     def on_message(self, message):
