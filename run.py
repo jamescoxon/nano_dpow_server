@@ -39,6 +39,8 @@ from enum import Enum
 # import datetime
 # from tornado.concurrent import Future, chain_future
 
+TIMEOUT_ON_DEMAND = 10.0
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--rai_node_uri", help='rai_nodes uri, usually 127.0.0.1', default='127.0.0.1')
 parser.add_argument("--rai_node_port", help='rai_node port, usually 7076', default='7076')
@@ -53,6 +55,7 @@ wss_demand = []
 wss_precache = []
 wss_work = []
 hash_to_precache = []
+work_tracker = {}
 
 worker_counter = 0
 
@@ -182,21 +185,21 @@ class Work(tornado.web.RequestHandler):
                 yield rethinkdb.db("pow").table("hashes").insert(
                     {"account": account, "hash": hash_hex, "work": WorkState.doing.value, "threshold": threshold_str}).run(conn)
 
-        x = 0
+        work_tracker[hash_hex] = -1
+        t_start = time.time()
         print_time("Waiting for work...")
-        while x < 20:
-            #            print_time(x)
-            ws_data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).nth(0).default(False).run(conn)
-            if ws_data:
-                new_work = ws_data
-                if new_work['work'] != WorkState.needs.value and new_work['work'] != WorkState.doing.value:
-                    # print_time(new_work['work'])
-                    work_output = new_work['work']
+        while time.time() - t_start < TIMEOUT_ON_DEMAND:
+            try:
+                if work_tracker.get(hash_hex) != -1:
+                    work_output = work_tracker.pop(hash_hex)
+                    print_time_debug("Hash handled in {} seconds: {}".format(time.time()-t_start, hash_hex))
                     raise gen.Return(work_output)
-
+            except KeyError:
+                # TODO instead of returning as timeout, here we could give the work to some other client
+                print_time("Hash not found in work_tracker, returning as timeout: {}".format(hash_hex))
+                break
             else:
-                x = x + 1
-                yield gen.sleep(1.0)
+                yield gen.sleep(0.05)
 
         result = '{"status" : "timeout"}'
         raise gen.Return(result)
@@ -286,6 +289,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         r = requests.post(rai_node_address, data=get_validation)
         resulting_validation = r.json()
         if 'error' in resulting_validation:
+            print_time_debug(get_validation)
             raise gen.Return('Error in validation: {}'.format(resulting_validation))
         return int(resulting_validation['valid'])
 
@@ -342,6 +346,9 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     if hash_hex in hash_to_precache:
                         hash_to_precache.remove(hash_hex)
 
+                    # Update the work tracker so that the service wait loop knows it is done
+                    work_tracker[hash_hex] = work
+
                     # Add work record to client database to allow payouts
                     clients_data = yield rethinkdb.db("pow").table("clients").filter(
                         rethinkdb.row['account'] == payout_account).nth(0).default(False).run(conn)
@@ -370,6 +377,12 @@ class WSHandler(tornado.websocket.WebSocketHandler):
             if self in wss_work:
                 print_time("Removing {} from wss_work after exception".format(self))
                 wss_work.remove(self)
+
+            # Remove from work tracker, the service wait loop can decide what to do (for instance give work to someone else)
+            try:
+                work_tracker.pop(hash_hex)
+            except KeyError:
+                print_time("Error - tried to remove hash but it was no longer in work_tracker: {}".format(hash_hex))
 
     def update_work_type(self, work_type):
         # remove from any lists
