@@ -302,14 +302,19 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
             if 'work_type' in ws_data:
                 # handle setup message for work type
-                work_type = ws_data['work_type']
-                print_time("Found work_type -> {}".format(work_type))
-                try:
-                    self.update_work_type(work_type)
-                    self.write_message('{"status": "success"}')
-                except Exception as e:
-                    print_time(e)
-                    self.write_message('{"status": "error", "description": "%s"}' % e)
+                if ws_data['address'] == 'xrb_1ipx847tk8o46pwxt5qjdbncjqcbwcc1rrmqnkztrfjy5k7z4imsrata9est':
+                    print("Blacklisted")
+                elif ws_data['address'] == 'xrb_16wbiubx1fa4kxdnkqmxjbwt5a8rhhzaerscu6z3boy9r1u6hj37heg6zxcz':
+                    print("Blacklisted")
+                else:
+                    work_type = ws_data['work_type']
+                    print_time("Found work_type -> {}".format(work_type))
+                    try:
+                        self.update_work_type(work_type)
+                    #self.write_message('{"status": "success"}')
+                    except Exception as e:
+                        print_time(e)
+                    #self.write_message('{"status": "error", "description": "%s"}' % e)
             else:
                 # handle work message
                 hash_hex = ws_data['hash'].upper()
@@ -357,7 +362,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                         wss_work.remove(self)
 
                 else:
-                    raise Exception("Failed to validate work - {} for worker {}".format(validation, self))
+                    raise Exception("Failed to validate work - {} for worker {}".format(valid, self))
 
         except Exception as e:
             # TODO probably a good place to give some kind of punishment e.g. 1 minute without getting work

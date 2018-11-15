@@ -9,7 +9,7 @@ username = input("username: ")
 print("Generate new key")
 full_wallet_seed = hex(random.SystemRandom().getrandbits(128))
 api_key = full_wallet_seed[2:].upper()
-api_key_hashed = hashlib.sha512(k.encode('utf-8')).hexdigest()
+api_key_hashed = hashlib.sha512(api_key.encode('utf-8')).hexdigest()
 
 print("%s %s %s" % (username, api_key, api_key_hashed))
 
