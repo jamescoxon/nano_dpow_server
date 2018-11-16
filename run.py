@@ -56,11 +56,13 @@ wss_precache = []
 wss_work = []
 hash_to_precache = []
 work_tracker = {}
+blacklist = {}
 
 worker_counter = 0
 
 rethinkdb.set_loop_type("tornado")
 connection = rethinkdb.connect("localhost", 28015)
+
 
 def print_time_debug(message):
     if args.verbose:
@@ -83,6 +85,21 @@ def print_lists(work=False, demand=False, precache=False):
     if precache:
         s += "\n\t\t\twss_precache: {}".format(wss_precache)
     print_time(s)
+
+
+def build_blacklist(filepath='blacklist.txt'):
+    try:
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+    except:
+        print('Blacklist file does not exist: {}'.format(filepath))
+        return {}
+
+    blacklist = { line.split('\n')[0] for line in lines }
+    print('Built blacklist:')
+    { print('\t{}'.format(acc)) for acc in blacklist }
+
+    return blacklist
 
 
 class WorkState(Enum):
@@ -308,10 +325,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
             if 'work_type' in ws_data:
                 # handle setup message for work type
-                if ws_data['address'] == 'xrb_1ipx847tk8o46pwxt5qjdbncjqcbwcc1rrmqnkztrfjy5k7z4imsrata9est':
-                    print("Blacklisted")
-                elif ws_data['address'] == 'xrb_16wbiubx1fa4kxdnkqmxjbwt5a8rhhzaerscu6z3boy9r1u6hj37heg6zxcz':
-                    print("Blacklisted")
+                if ws_data['address'] in blacklist:
+                    print("Blacklisted: {}".format(ws_data['address']))
                 else:
                     work_type = ws_data['work_type']
                     print_time("Found work_type -> {}".format(work_type))
@@ -586,6 +601,8 @@ if __name__ == "__main__":
     myIP = socket.gethostbyname(socket.gethostname())
 
     tornado.ioloop.IOLoop.current().run_sync(setup_db)
+
+    blacklist = build_blacklist('blacklist.txt')
 
     print_time('*** Websocket Server Started at %s***' % myIP)
     #    main_loop.add_timeout(datetime.timedelta(seconds=10), precache_update)
