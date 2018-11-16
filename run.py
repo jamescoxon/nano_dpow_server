@@ -39,7 +39,7 @@ from enum import Enum
 # import datetime
 # from tornado.concurrent import Future, chain_future
 
-TIMEOUT_ON_DEMAND = 10.0
+TIMEOUT_ON_DEMAND = 6.0
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--rai_node_uri", help='rai_nodes uri, usually 127.0.0.1', default='127.0.0.1')
