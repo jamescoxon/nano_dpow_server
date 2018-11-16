@@ -138,10 +138,10 @@ class Work(tornado.web.RequestHandler):
                 if ws not in wss_work:
                     ws.write_message(message)
                     wss_work.append(ws)
-                    return '{"status":"sent"}'
-                else:
-                    print_time(str(ws) + " already in use")
-        return '{"status":"failed"}'
+                    return ws
+
+        # no clients
+        return None
 
     @gen.coroutine
     def get_work_via_ws(self, hash_hex):
@@ -171,7 +171,7 @@ class Work(tornado.web.RequestHandler):
             send_result = yield self.ws_demand('{"hash" : "%s", "type" : "urgent", "threshold" : "%s"}' % (hash_hex,threshold_str))
 
             # If no clients, mark this account in DB
-            if send_result == '{"status" : "failed"}':
+            if not send_result:
                 print_time("No clients to to work for account %s" % account)
                 error = 'no_clients'
                 break
