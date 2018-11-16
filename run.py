@@ -159,50 +159,64 @@ class Work(tornado.web.RequestHandler):
         threshold = nano.threshold_multiplier(nano.NANO_DIFFICULTY, multiplier)
         threshold_str = nano.threshold_to_str(threshold)
 
-        # Send request to websocket clients to process
-        send_result = yield self.ws_demand('{"hash" : "%s", "type" : "urgent", "threshold" : "%s"}' % (hash_hex,threshold_str))
 
-        # Check for previous account
-        print_time("Account %s" % account)
-        data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).run(conn)
-        while (yield data.fetch_next()):
+        # Try up to 2 times, sending work to another client if the first fails
+        error = None
+        max_tries = 2
+        try_count = 0
+        while try_count < max_tries:
+            try_count += 1
+
+            # Send request to websocket clients to process
+            send_result = yield self.ws_demand('{"hash" : "%s", "type" : "urgent", "threshold" : "%s"}' % (hash_hex,threshold_str))
+
+            # If no clients, mark this account in DB
             if send_result == '{"status" : "failed"}':
-                result = '{"status" : "no clients"}'
+                print_time("No clients to to work for account %s" % account)
+                error = 'no_clients'
+                break
+
+            # Place this hash in the work tracker so it can be updated in the client handler
+            work_tracker[hash_hex] = -1
+            t_start = time.time()
+            print_time("Waiting for work...")
+            while time.time() - t_start < TIMEOUT_ON_DEMAND:
+                try:
+                    if work_tracker.get(hash_hex) != -1:
+                        work_output = work_tracker.pop(hash_hex)
+                        print_time_debug("Hash handled in {} seconds: {}".format(time.time()-t_start, hash_hex))
+                        raise gen.Return(work_output)
+                except KeyError:
+                    if try_count < max_tries:
+                        print_time_debug("Hash was removed from work_tracker due to an error, trying again with another client {}".format(hash_hex))
+                    else:
+                        print_time("{} clients failed this hash, there is probably something wrong, returning an error: {}".format(hash_hex))
+                        error = 'failed_clients'
+                        break
+                else:
+                    yield gen.sleep(0.01)
+
+        if error:
+            # Mark account as needing work
+            data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).run(conn)
+            while (yield data.fetch_next()):
+                # account was present in DB, simply update it
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
                     {"hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
-                raise gen.Return(result)
             else:
-                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
-                    {"hash": hash_hex, "work": WorkState.doing.value, "threshold": threshold_str}).run(conn)
-                break
-        else:
-            if send_result == '{"status" : "failed"}':
-                result = '{"status" : "no clients"}'
+                # insert as new account
                 yield rethinkdb.db("pow").table("hashes").insert(
                     {"account": account, "hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
-                raise gen.Return(result)
-            else:
-                yield rethinkdb.db("pow").table("hashes").insert(
-                    {"account": account, "hash": hash_hex, "work": WorkState.doing.value, "threshold": threshold_str}).run(conn)
 
-        work_tracker[hash_hex] = -1
-        t_start = time.time()
-        print_time("Waiting for work...")
-        while time.time() - t_start < TIMEOUT_ON_DEMAND:
-            try:
-                if work_tracker.get(hash_hex) != -1:
-                    work_output = work_tracker.pop(hash_hex)
-                    print_time_debug("Hash handled in {} seconds: {}".format(time.time()-t_start, hash_hex))
-                    raise gen.Return(work_output)
-            except KeyError:
-                # TODO instead of returning as timeout, here we could give the work to some other client
-                print_time("Hash not found in work_tracker, returning as timeout: {}".format(hash_hex))
-                break
-            else:
-                yield gen.sleep(0.05)
+            if error == 'no_clients':
+                raise gen.Return('{"status" : "no clients"}')
 
-        result = '{"status" : "timeout"}'
-        raise gen.Return(result)
+            elif error == 'failed_clients':
+                raise gen.Return('{"status" : "error"}')
+
+        else:
+            # No specific error by client handler, simply a timeout reached
+            raise gen.Return('{"status" : "timeout"}')
 
     @gen.coroutine
     def post(self):
@@ -528,6 +542,11 @@ def precache_update():
                     {"work": WorkState.needs.value, "hash": results['frontier']}).run(conn)
         except Exception as e:
             print_time_debug(e)
+            try:
+                print_time_debug(get_frontier)
+                print_time_debug(results)
+            except:
+                pass
             print_time('Checking to see if it is a case of a mistaken open block')
 
             # In this error, perhaps the system mistakenly added as an open block, when the node simply didn't have that block yet.
