@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import nanoutils as nano
+from interface_client import InterfaceClient
 import tornado.httpserver
 import tornado.websocket
 import tornado.ioloop
@@ -30,13 +31,14 @@ import socket
 import requests
 import json
 import time
+import datetime
 import argparse
 import random
 import rethinkdb
 import hashlib
+import uuid
 from enum import Enum
 
-# import datetime
 # from tornado.concurrent import Future, chain_future
 
 TIMEOUT_ON_DEMAND = 10.0
@@ -45,6 +47,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--rai_node_uri", help='rai_nodes uri, usually 127.0.0.1', default='127.0.0.1')
 parser.add_argument("--rai_node_port", help='rai_node port, usually 7076', default='7076')
 parser.add_argument("--internal_port", help='internal port which nginx proxys', default='5000')
+parser.add_argument("--interface", action='store_true')
 parser.add_argument("-v", "--verbose", help='more prints to help debugging', action='store_true')
 
 args = parser.parse_args()
@@ -61,6 +64,8 @@ worker_counter = 0
 
 rethinkdb.set_loop_type("tornado")
 connection = rethinkdb.connect("localhost", 28015)
+
+timezone = rethinkdb.make_timezone('+00:00')
 
 def print_time_debug(message):
     if args.verbose:
@@ -83,6 +88,10 @@ def print_lists(work=False, demand=False, precache=False):
     if precache:
         s += "\n\t\t\twss_precache: {}".format(wss_precache)
     print_time(s)
+
+
+def get_all_clients():
+    return set( wss_work + wss_demand + wss_precache )
 
 
 class WorkState(Enum):
@@ -191,7 +200,7 @@ class Work(tornado.web.RequestHandler):
         while time.time() - t_start < TIMEOUT_ON_DEMAND:
             try:
                 if work_tracker.get(hash_hex) != -1:
-                    work_output = work_tracker.pop(hash_hex)
+                    work_output, client_id = work_tracker.pop(hash_hex)
                     print_time_debug("Hash handled in {} seconds: {}".format(time.time()-t_start, hash_hex))
                     raise gen.Return(work_output)
             except KeyError:
@@ -202,11 +211,12 @@ class Work(tornado.web.RequestHandler):
                 yield gen.sleep(0.05)
 
         result = '{"status" : "timeout"}'
-        raise gen.Return(result)
+        raise gen.Return(result, client_id)
 
     @gen.coroutine
     def post(self):
         post_data = json.loads(self.request.body.decode('utf-8'))
+        receive_time = datetime.datetime.now(timezone)
         if 'hash' in post_data:
             hash_hex = post_data['hash'].upper()
         else:
@@ -215,6 +225,7 @@ class Work(tornado.web.RequestHandler):
             self.write(return_json)
             return
 
+        client_id = None
         conn = yield connection
 
         # 1 Check key is valid
@@ -222,16 +233,16 @@ class Work(tornado.web.RequestHandler):
             print_time("found API key")
             key = post_data['key']
             key_hashed = hashlib.sha512(key.encode('utf-8')).hexdigest()
-            data = yield rethinkdb.db("pow").table("api_keys").filter({"api_key": key_hashed}).nth(0).default(False).run(conn)
-            if not data:
+            service_data = yield rethinkdb.db("pow").table("api_keys").filter({"api_key": key_hashed}).nth(0).default(False).run(conn)
+            if not service_data:
                 print_time("incorrect API key")
                 return_json = '{"status" : "incorrect key"}'
                 print_time(return_json)
                 self.write(return_json)
                 return
             else:
-                print_time("Correct API key from %s - continue" % data['username'])
-                new_count = int(data['count']) + 1
+                print_time("Correct API key from %s - continue" % service_data['username'])
+                new_count = int(service_data['count']) + 1
                 yield rethinkdb.db("pow").table("api_keys").filter(rethinkdb.row['api_key'] == key_hashed).update(
                     {"count": new_count}).run(conn)
         else:
@@ -241,20 +252,24 @@ class Work(tornado.web.RequestHandler):
             self.write(return_json)
             return
         # 2 Do we have hash in db?
-        data = yield rethinkdb.db("pow").table("hashes").filter({"hash": hash_hex}).nth(0).default(False).run(conn)
-        #        data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash).nth(0).run(conn)
-        #        print_time(data)
-        if data:
-            precache_work = data
-            print_time('Found cached work value %s' % precache_work['work'])
-            work_output = precache_work['work']
+        hash_data = yield rethinkdb.db("pow").table("hashes").filter({"hash": hash_hex}).nth(0).default(False).run(conn)
+        if hash_data:
+            print_time('Found cached work value %s' % hash_data['work'])
+            work_output = hash_data['work']
             if work_output == WorkState.needs.value or work_output == WorkState.doing.value:
                 print_time("Empty work, get new")
-                work_output = yield self.get_work_via_ws(hash_hex)
+                work_output, client_id = yield self.get_work_via_ws(hash_hex)
+                work_type = 'on_demand'
+            else:
+                work_type = 'precached'
         else:
             # 3 If not then request pow via websockets
             print_time('Not in DB, getting on demand...')
-            work_output = yield self.get_work_via_ws(hash_hex)
+            work_output, client_id = yield self.get_work_via_ws(hash_hex)
+            work_type = 'on_demand'
+
+        complete_time = datetime.datetime.now(timezone)
+        work_ok = False
 
         # 4 Return work
         if work_output == '{"status" : "timeout"}':
@@ -265,9 +280,20 @@ class Work(tornado.web.RequestHandler):
             return_json = work_output
         else:
             return_json = '{"work" :"%s"}' % work_output
+            work_ok = True
 
         print_time(return_json)
         self.write(return_json)
+
+        # Interface update
+        if work_ok and interface:
+
+            # Random request id
+            request_id = str(uuid.UUID(int=random.SystemRandom().getrandbits(128)))
+
+            # Send to interface
+            service_id = service_data['id']
+            interface.pow_update(request_id,service_id,client_id, work_type, receive_time, complete_time)
 
 
 class WSHandler(tornado.websocket.WebSocketHandler):
@@ -277,6 +303,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
     def __init__(self, *args, **kwargs):
         WSHandler.worker_counter += 1
         self.id = WSHandler.worker_counter
+        self.type = ''
+        self.address = ''
         super().__init__(*args, **kwargs)
 
     def __repr__(self):
@@ -295,8 +323,6 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def open(self):
         print_time('New worker connected - {}'.format(self.id))
-#        if self not in wss_demand:
-#            wss_demand.append(self)
 
     @gen.coroutine
     def on_message(self, message):
@@ -305,6 +331,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
             ws_data = json.loads(message)
             if 'address' not in ws_data:
                 raise Exception('Incorrect data from client: {}'.format(ws_data))
+
+            self.address = ws_data['address']
 
             if 'work_type' in ws_data:
                 # handle setup message for work type
@@ -347,12 +375,12 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 valid = self.validate_work(hash_hex, work, threshold_str)
                 if valid:
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).update(
-                        {"work": work}).run(conn)
+                        {"work": work, "client_id": payout_account}).run(conn)
                     if hash_hex in hash_to_precache:
                         hash_to_precache.remove(hash_hex)
 
                     # Update the work tracker so that the service wait loop knows it is done
-                    work_tracker[hash_hex] = work
+                    work_tracker[hash_hex] = (work, payout_account)
 
                     # Add work record to client database to allow payouts
                     clients_data = yield rethinkdb.db("pow").table("clients").filter(
@@ -399,12 +427,15 @@ class WSHandler(tornado.websocket.WebSocketHandler):
             # Add to both demand and precache
             wss_demand.append(self)
             wss_precache.append(self)
+            self.type = 'B'
         elif work_type == 'precache_only':
             # Add to precache
             wss_precache.append(self)
+            self.type = 'P'
         elif work_type == 'urgent_only':
             # Add to demand
             wss_demand.append(self)
+            self.type = 'U'
         else:
             raise Exception('Invalid work type {}'.format(work_type))
 
@@ -580,10 +611,50 @@ def setup_db():
                 hash_to_precache.append(documents['hash'])
 
 
+@gen.coroutine
+def update_interface_clients():
+    connected_clients = get_all_clients()
+    clients = list(map(lambda c: {
+        'client_id': c.address,
+        'client_address': c.address,
+        'client_type': c.type
+    }, connected_clients))
+
+    interface.clients_update(clients)
+    print_time_debug("Updated interface clients")
+
+@gen.coroutine
+def update_interface_services():
+    conn = yield connection
+    registered_services = yield rethinkdb.db("pow").table("api_keys").run(conn)
+    if registered_services:
+        services = list(map(lambda s: {
+            'service_id': s.get('id'),
+            'service_name': (s.get('display_name') or s.get('username')) if s.get('public') else None,
+            'service_web': (s.get('website') or '') if s.get('public') else ''
+        }, registered_services.items))
+
+        interface.services_update(services)
+        print_time_debug("Updated interface services")
+    else:
+        print_time_debug("Could not update interface services")
+
+
 if __name__ == "__main__":
     http_server = tornado.httpserver.HTTPServer(application)
     http_server.listen(int(args.internal_port))
     myIP = socket.gethostbyname(socket.gethostname())
+
+    # setup interface
+    if args.interface:
+        interface = InterfaceClient()
+        if not interface.read_config('interface.cfg'):
+            print_time('INTERFACE DISABLED')
+            interface = None
+        else:
+            print_time('Interface is setup -> {}'.format(interface.server))
+    else:
+        interface = None
 
     tornado.ioloop.IOLoop.current().run_sync(setup_db)
 
@@ -594,6 +665,15 @@ if __name__ == "__main__":
     pc.start()
     push = tornado.ioloop.PeriodicCallback(push_precache, 5000)
     push.start()
+    if interface:
+        # clients update every 10 seconds
+        icli = tornado.ioloop.PeriodicCallback(update_interface_clients, 10000)
+        icli.start()
+
+        # services update every 60 seconds
+        iserv = tornado.ioloop.PeriodicCallback(update_interface_services, 60000)
+        iserv.start()
+
     # tornado.ioloop.IOLoop.instance().start()
     main_loop = tornado.ioloop.IOLoop.instance()
 
