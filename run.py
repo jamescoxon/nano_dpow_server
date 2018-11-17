@@ -198,12 +198,10 @@ class Work(tornado.web.RequestHandler):
 
         if error:
             # Mark account as needing work
-            data = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).run(conn)
-            while (yield data.fetch_next()):
-                # account was present in DB, simply update it
-                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
+            # Try updating, in case the account already exists in the DB
+            changes = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
                     {"hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
-            else:
+            if not changes or changes['unchanged']:
                 # insert as new account
                 yield rethinkdb.db("pow").table("hashes").insert(
                     {"account": account, "hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
