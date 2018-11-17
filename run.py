@@ -194,6 +194,7 @@ class Work(tornado.web.RequestHandler):
                 yield rethinkdb.db("pow").table("hashes").insert(
                     {"account": account, "hash": hash_hex, "work": WorkState.doing.value, "threshold": threshold_str}).run(conn)
 
+        client_id = None
         work_tracker[hash_hex] = -1
         t_start = time.time()
         print_time("Waiting for work...")
@@ -375,7 +376,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 valid = self.validate_work(hash_hex, work, threshold_str)
                 if valid:
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).update(
-                        {"work": work, "client_id": payout_account}).run(conn)
+                        {"work": work}).run(conn)
                     if hash_hex in hash_to_precache:
                         hash_to_precache.remove(hash_hex)
 
