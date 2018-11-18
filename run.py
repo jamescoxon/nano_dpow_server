@@ -47,7 +47,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--rai_node_uri", help='rai_nodes uri, usually 127.0.0.1', default='127.0.0.1')
 parser.add_argument("--rai_node_port", help='rai_node port, usually 7076', default='7076')
 parser.add_argument("--internal_port", help='internal port which nginx proxys', default='5000')
-parser.add_argument("--interface", action='store_true')
+parser.add_argument("--interface", help='send data to interface (configured in interface.cfg', action='store_true')
 parser.add_argument("-v", "--verbose", help='more prints to help debugging', action='store_true')
 
 args = parser.parse_args()
@@ -57,6 +57,7 @@ rai_node_address = 'http://{uri}:{port}'.format(uri=args.rai_node_uri, port=args
 wss_demand = []
 wss_precache = []
 wss_work = []
+wss_timeout = []
 hash_to_precache = []
 work_tracker = {}
 
@@ -77,7 +78,7 @@ def print_time(message):
     print(time.strftime("%d/%m/%Y %H:%M:%S") + " " + str(message))
 
 
-def print_lists(work=False, demand=False, precache=False):
+def print_lists(work=False, demand=False, precache=False, timeout=False):
     if not (work or demand or precache):
         return
     s = "State of lists:"
@@ -87,11 +88,19 @@ def print_lists(work=False, demand=False, precache=False):
         s += "\n\t\t\twss_demand: {}".format(wss_demand)
     if precache:
         s += "\n\t\t\twss_precache: {}".format(wss_precache)
+    if timeout:
+        s += "\n\t\t\twss_timeout: {}".format(wss_timeout)
     print_time(s)
 
 
+def remove_from_timeout(client):
+    print_time("Removing {} from timeout".format(client))
+    if client in wss_timeout:
+        wss_timeout.remove(client)
+
+
 def get_all_clients():
-    return set( wss_work + wss_demand + wss_precache )
+    return set( wss_demand + wss_precache )
 
 
 class WorkState(Enum):
@@ -136,15 +145,14 @@ class Work(tornado.web.RequestHandler):
         print_time("Sending via WS Demand")
         # randomise our wss list then cycle through until we manage to send a message
         random.shuffle(wss_demand)
-        print_lists(work=1, demand=1)
+        print_lists(work=1, demand=1, timeout=1)
 
         for ws in wss_demand:
             if not ws.ws_connection.stream.socket:
                 print_time("Web socket does not exist anymore!!!")
-                wss_demand.remove(ws)
-                wss_work.remove(ws)
+                remove_from_lists(ws, timeout=True)
             else:
-                if ws not in wss_work:
+                if ws not in wss_work and ws not in wss_timeout:
                     ws.write_message(message)
                     wss_work.append(ws)
                     return ws
@@ -182,8 +190,14 @@ class Work(tornado.web.RequestHandler):
             # If no clients, mark this account in DB
             if not send_result:
                 print_time("No clients to to work for account %s" % account)
-                error = 'no_clients'
-                break
+                if wss_timeout and try_count != max_tries:
+                    print_lists(timeout=1)
+                    removed = wss_timeout.pop(0)
+                    print_time("Trying again after removing the oldest client in wss_timeout: {}".format(removed))
+                    continue
+                else:
+                    error = 'no_clients'
+                    break
 
             # Place this hash in the work tracker so it can be updated in the client handler
             client_id = None
@@ -197,14 +211,17 @@ class Work(tornado.web.RequestHandler):
                         print_time_debug("Hash handled in {} seconds: {}".format(time.time()-t_start, hash_hex))
                         raise gen.Return((work_output, client_id))
                 except KeyError:
-                    if try_count < max_tries:
-                        print_time_debug("Hash was removed from work_tracker due to an error, trying again with another client {}".format(hash_hex))
-                    else:
-                        print_time("{} clients failed this hash, there is probably something wrong, returning an error: {}".format(hash_hex))
-                        error = 'failed_clients'
-                        break
+                    print_time_debug("Hash was removed from work_tracker due to an error: {}".format(hash_hex))
+                    error = 'failed_clients'
+                    break
                 else:
                     yield gen.sleep(0.01)
+
+            # Took too long, add to timeout list
+            client_to_timeout = send_result
+            print_time("Placing {} in timeout for 3 minutes".format(client_to_timeout))
+            wss_timeout.append(client_to_timeout)
+            tornado.ioloop.IOLoop.current().add_timeout(time.time() + 3*60, lambda: remove_from_timeout(client_to_timeout))
 
         if error:
             # Mark account as needing work
@@ -225,6 +242,7 @@ class Work(tornado.web.RequestHandler):
         else:
             # No specific error by client handler, simply a timeout reached
             raise gen.Return(('timeout', None))
+
 
     @gen.coroutine
     def post(self):
@@ -318,7 +336,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def __repr__(self):
         return '{id} ({state})'.format(id=self.id or '?',
-                                       state='busy' if self in wss_work else 'free')
+                                       state='timeout' if self in wss_timeout else 'busy' if self in wss_work else 'free')
 
     @staticmethod
     def validate_work(hash_hex, work, threshold):
@@ -414,7 +432,6 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     raise Exception("Failed to validate work - {} for worker {}".format(valid, self))
 
         except Exception as e:
-            # TODO probably a good place to give some kind of punishment e.g. 1 minute without getting work
             print_time("Error {}".format(e))
             if self in wss_work:
                 print_time("Removing {} from wss_work after exception".format(self))
@@ -452,10 +469,13 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         print_time('Worker disconnected - {}'.format(self.id))
         self.remove_from_lists()
 
-    def remove_from_lists(self):
+    def remove_from_lists(self, timeout=False):
         for l in [wss_work, wss_demand, wss_precache]:
             if self in l:
                 l.remove(self)
+        if timeout:
+            if self in wss_timeout:
+                wss_timeout.remove(self)
 
     def check_origin(self, origin):
         return True
@@ -471,7 +491,6 @@ application = tornado.web.Application([
 def push_precache():
     hash_count = 0
     work_count = 0
-    #    print_time(hash_to_precache)
 
     # Get appropriate threshold value
     # TODO what is a good threshold value for precaching?
@@ -483,7 +502,7 @@ def push_precache():
         hash_count = hash_count + 1
         print_time("Got precache work to push")
         random.shuffle(wss_precache)
-        print_lists(work=1, precache=1)
+        print_lists(work=1, precache=1, timeout=1)
         hash_handled = False
         for work_clients in wss_precache:  # type: WSHandler
             print_time("Sending via WS Precache")
@@ -493,7 +512,7 @@ def push_precache():
                     wss_precache.remove(work_clients)
                     wss_work.remove(work_clients)
                 else:
-                    if work_clients not in wss_work:
+                    if work_clients not in wss_work and work_clients not in wss_timeout:
                         work_count = work_count + 1
                         message = '{"hash" : "%s", "type" : "precache", "threshold" : "%s"}' % (hash_hex, threshold_str)
                         work_clients.write_message(message)
@@ -521,9 +540,6 @@ def push_precache():
         else:
             print_time("Precache not handled - no free workers?")
 
-
-#   print_time("Work Count: %d, Hash Count: %d" % (hash_count, work_count))
-# tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=5), push_precache)
 
 @gen.coroutine
 def precache_update():
@@ -609,8 +625,7 @@ def precache_update():
 
     print_time("Count: {:d}, Work: {:d}, Up to date:  {:d}, Not in queue: {:d}, Not up to date: {:d}, Delete error: {:d}".format(
                 count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
-    print_lists(work=1, precache=1, demand=1)
-    # tornado.ioloop.IOLoop.instance().add_timeout(datetime.timedelta(seconds=60), precache_update)
+    print_lists(work=1, precache=1, demand=1, timeout=1)
 
 
 @gen.coroutine
@@ -673,8 +688,6 @@ if __name__ == "__main__":
     tornado.ioloop.IOLoop.current().run_sync(setup_db)
 
     print_time('*** Websocket Server Started at %s***' % myIP)
-    #    main_loop.add_timeout(datetime.timedelta(seconds=10), precache_update)
-    #    main_loop.add_timeout(datetime.timedelta(seconds=10), push_precache)
     pc = tornado.ioloop.PeriodicCallback(precache_update, 30000)
     pc.start()
     push = tornado.ioloop.PeriodicCallback(push_precache, 5000)
@@ -688,7 +701,6 @@ if __name__ == "__main__":
         iserv = tornado.ioloop.PeriodicCallback(update_interface_services, 60000)
         iserv.start()
 
-    # tornado.ioloop.IOLoop.instance().start()
     main_loop = tornado.ioloop.IOLoop.instance()
 
     try:
