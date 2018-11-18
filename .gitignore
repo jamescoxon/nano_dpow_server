@@ -4,6 +4,7 @@ blacklist.txt
 
 ### RethinkDB
 rethinkdb_data/
+interface.cfg
 
 ### Python template
 # Byte-compiled / optimized / DLL files
