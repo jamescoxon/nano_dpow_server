@@ -289,14 +289,14 @@ class Work(tornado.web.RequestHandler):
             if work_output == WorkState.needs.value or work_output == WorkState.doing.value:
                 print_time("Empty work, get new")
                 work_output, client_id, threshold = yield self.get_work_via_ws(hash_hex)
-                work_type = 'on_demand'
+                work_type = 'O'
             else:
-                work_type = 'precached'
+                work_type = 'P'
         else:
             # 3 If not then request pow via websockets
             print_time('Not in DB, getting on demand...')
             work_output, client_id, threshold = yield self.get_work_via_ws(hash_hex)
-            work_type = 'on_demand'
+            work_type = 'O'
 
         complete_time = datetime.datetime.now(timezone)
 
@@ -460,7 +460,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         elif work_type == 'urgent_only':
             # Add to demand
             wss_demand.append(self)
-            self.type = 'U'
+            self.type = 'O'
         else:
             raise Exception('Invalid work type {}'.format(work_type))
 
