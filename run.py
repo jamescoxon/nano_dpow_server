@@ -308,7 +308,7 @@ class Work(tornado.web.RequestHandler):
                 work_type = 'P'
                 client_id = hash_data.get('last_worker') or None
                 if 'threshold' in hash_data:
-                    multiplier = nano.to_multiplier(nano.NANO_DIFFICULTY, hash_data['threshold'])
+                    multiplier = nano.to_multiplier(nano.NANO_DIFFICULTY, nano.threshold_from_str(hash_data['threshold']))
                 else:
                     multiplier = 1.0
         else:

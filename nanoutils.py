@@ -25,6 +25,10 @@ def threshold_to_str(th):
     return hex(th)[2:]
 
 
+def threshold_from_str(s):
+    return int('0x'+s, 16)
+
+
 def hex_to_account(hex_acc: str) -> (str, str):
     """
     Given a string containing a hex address, encode to public address.
