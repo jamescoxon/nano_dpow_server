@@ -60,6 +60,7 @@ wss_work = []
 wss_timeout = []
 hash_to_precache = []
 work_tracker = {}
+blacklist = {}
 
 worker_counter = 0
 
@@ -101,6 +102,20 @@ def remove_from_timeout(client):
 
 def get_all_clients():
     return set( wss_demand + wss_precache )
+
+def build_blacklist(filepath='blacklist.txt'):
+    try:
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+    except:
+        print('Blacklist file does not exist: {}'.format(filepath))
+        return {}
+
+    blacklist = { line.split('\n')[0] for line in lines }
+    print('Built blacklist:')
+    { print('\t{}'.format(acc)) for acc in blacklist }
+
+    return blacklist
 
 
 class WorkState(Enum):
@@ -362,10 +377,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
             if 'work_type' in ws_data:
                 # handle setup message for work type
-                if ws_data['address'] == 'xrb_1ipx847tk8o46pwxt5qjdbncjqcbwcc1rrmqnkztrfjy5k7z4imsrata9est':
-                    print("Blacklisted")
-                elif ws_data['address'] == 'xrb_16wbiubx1fa4kxdnkqmxjbwt5a8rhhzaerscu6z3boy9r1u6hj37heg6zxcz':
-                    print("Blacklisted")
+                if ws_data['address'] in blacklist:
+                    print("Blacklisted: {}".format(ws_data['address']))
                 else:
                     work_type = ws_data['work_type']
                     print_time("Found work_type -> {}".format(work_type))
@@ -685,6 +698,8 @@ if __name__ == "__main__":
         interface = None
 
     tornado.ioloop.IOLoop.current().run_sync(setup_db)
+
+    blacklist = build_blacklist('blacklist.txt')
 
     print_time('*** Websocket Server Started at %s***' % myIP)
     pc = tornado.ioloop.PeriodicCallback(precache_update, 30000)
