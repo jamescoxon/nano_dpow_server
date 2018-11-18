@@ -187,7 +187,7 @@ class Work(tornado.web.RequestHandler):
         # Get appropriate threshold value
         # TODO after prioritization PoW is implemented, calculate here an appropriate multiplier
         multiplier = 1.0
-        threshold = nano.threshold_multiplier(nano.NANO_DIFFICULTY, multiplier)
+        threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
         threshold_str = nano.threshold_to_str(threshold)
 
 
@@ -270,7 +270,6 @@ class Work(tornado.web.RequestHandler):
             self.write(return_json)
             return
 
-        client_id = None
         conn = yield connection
 
         # 1 Check key is valid
@@ -303,14 +302,19 @@ class Work(tornado.web.RequestHandler):
             work_output = hash_data['work']
             if work_output == WorkState.needs.value or work_output == WorkState.doing.value:
                 print_time("Empty work, get new")
-                work_output, client_id, threshold = yield self.get_work_via_ws(hash_hex)
+                work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex)
                 work_type = 'O'
             else:
                 work_type = 'P'
+                client_id = hash_data.get('client_id') or None
+                if 'threshold' in hash_data:
+                    multiplier = nano.to_multiplier(nano.NANO_DIFFICULTY, hash_data['threshold'])
+                else:
+                    multiplier = 1.0
         else:
             # 3 If not then request pow via websockets
             print_time('Not in DB, getting on demand...')
-            work_output, client_id, threshold = yield self.get_work_via_ws(hash_hex)
+            work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex)
             work_type = 'O'
 
         complete_time = datetime.datetime.now(timezone)
@@ -334,7 +338,7 @@ class Work(tornado.web.RequestHandler):
 
             # Send to interface
             service_id = service_data['id']
-            interface.pow_update(request_id,service_id,client_id, work_type, threshold, receive_time, complete_time)
+            interface.pow_update(request_id, service_id, client_id, work_type, multiplier, receive_time, complete_time)
 
 
 class WSHandler(tornado.websocket.WebSocketHandler):
@@ -414,7 +418,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 valid = self.validate_work(hash_hex, work, threshold_str)
                 if valid:
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).update(
-                        {"work": work}).run(conn)
+                        {"work": work, "last_worker": payout_account}).run(conn)
                     if hash_hex in hash_to_precache:
                         hash_to_precache.remove(hash_hex)
 
@@ -507,7 +511,7 @@ def push_precache():
     # Get appropriate threshold value
     # TODO what is a good threshold value for precaching?
     multiplier = 1.0
-    threshold = nano.threshold_multiplier(nano.NANO_DIFFICULTY, multiplier)
+    threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
     threshold_str = nano.threshold_to_str(threshold)
 
     for hash_hex in hash_to_precache:
@@ -620,7 +624,7 @@ def precache_update():
                 # Get appropriate threshold value
                 # TODO what is a good threshold value for precaching?
                 multiplier = 1.0
-                threshold = nano.threshold_multiplier(nano.NANO_DIFFICULTY, multiplier)
+                threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
                 threshold_str = nano.threshold_to_str(threshold)
 
                 yield rethinkdb.db("pow").table("hashes").insert(

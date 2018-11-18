@@ -8,15 +8,17 @@ NANO_DIFFICULTY = 0xffffffc000000000
 BANANO_DIFFICULTY = 0xfffffe0000000000
 
 
-def threshold_multiplier(base_difficulty: int, multiplier: float) -> int:
-    # to get the multiplier, you usually do (e.g. banano):
-    #     ((1 << 64) - NANO_DIFFICULTY)) / (((1 << 64) - BANANO_DIFFICULTY)
-    # easy to get the new difficulty out of that given a multiplier
+def to_multiplier(base_difficulty: int, difficulty: int) -> float:
+    return float((1 << 64) - base_difficulty) / float((1 << 64) - difficulty)
+
+
+def from_multiplier(base_difficulty: int, multiplier: float) -> int:
     return int((base_difficulty - (1 << 64)) / multiplier + (1 << 64))
 
 
 # tests
-assert(threshold_multiplier(NANO_DIFFICULTY, 0.125) == BANANO_DIFFICULTY)
+assert(to_multiplier(NANO_DIFFICULTY, BANANO_DIFFICULTY) == 0.125)
+assert(from_multiplier(NANO_DIFFICULTY, 0.125) == BANANO_DIFFICULTY)
 
 
 def threshold_to_str(th):
