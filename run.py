@@ -167,8 +167,7 @@ class Work(tornado.web.RequestHandler):
         # Get account to setup DB entries and check if invalid hash
         account = yield self.get_account_from_hash(hash_hex)
         if account == 'Error':
-            result = '{"status" : "bad hash"}'
-            raise gen.Return((result, None))
+            raise gen.Return(('bad hash', None, None))
 
         # Get appropriate threshold value
         # TODO after prioritization PoW is implemented, calculate here an appropriate multiplier
@@ -209,7 +208,7 @@ class Work(tornado.web.RequestHandler):
                     if work_tracker.get(hash_hex) != -1:
                         work_output, client_id = work_tracker.pop(hash_hex)
                         print_time_debug("Hash handled in {} seconds: {}".format(time.time()-t_start, hash_hex))
-                        raise gen.Return((work_output, client_id))
+                        raise gen.Return((work_output, client_id, multiplier))
                 except KeyError:
                     print_time_debug("Hash was removed from work_tracker due to an error: {}".format(hash_hex))
                     error = 'failed_clients'
@@ -234,14 +233,14 @@ class Work(tornado.web.RequestHandler):
                     {"account": account, "hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
 
             if error == 'no_clients':
-                raise gen.Return(('no clients', None))
+                raise gen.Return(('no clients', None, None))
 
             elif error == 'failed_clients':
-                raise gen.Return(('error', None))
+                raise gen.Return(('error', None, None))
 
         else:
             # No specific error by client handler, simply a timeout reached
-            raise gen.Return(('timeout', None))
+            raise gen.Return(('timeout', None, None))
 
 
     @gen.coroutine
@@ -289,14 +288,14 @@ class Work(tornado.web.RequestHandler):
             work_output = hash_data['work']
             if work_output == WorkState.needs.value or work_output == WorkState.doing.value:
                 print_time("Empty work, get new")
-                work_output, client_id = yield self.get_work_via_ws(hash_hex)
+                work_output, client_id, threshold = yield self.get_work_via_ws(hash_hex)
                 work_type = 'on_demand'
             else:
                 work_type = 'precached'
         else:
             # 3 If not then request pow via websockets
             print_time('Not in DB, getting on demand...')
-            work_output, client_id = yield self.get_work_via_ws(hash_hex)
+            work_output, client_id, threshold = yield self.get_work_via_ws(hash_hex)
             work_type = 'on_demand'
 
         complete_time = datetime.datetime.now(timezone)
@@ -320,7 +319,7 @@ class Work(tornado.web.RequestHandler):
 
             # Send to interface
             service_id = service_data['id']
-            interface.pow_update(request_id,service_id,client_id, work_type, receive_time, complete_time)
+            interface.pow_update(request_id,service_id,client_id, work_type, threshold, receive_time, complete_time)
 
 
 class WSHandler(tornado.websocket.WebSocketHandler):

@@ -39,18 +39,17 @@ class InterfaceClient(object):
         self.key = key
         return True
 
-    def pow_update(self, request_id, service_id, client_id, pow_type, time_req, time_res):
-        # TODO finish later, including difficulty
+    def pow_update(self, request_id, service_id, client_id, pow_type, pow_difficulty, time_req, time_res):
         if not self.ready:
             return False
 
         pow_js = json.dumps({
-            'action': 'pow_request',
             'api_key': self.key,
             'request_id': request_id,
             'service_id': service_id,
             'client_id': client_id,
             'pow_type': pow_type,
+            'pow_difficulty': pow_difficulty,
             'time_requested': formatted_time(time_req),
             'time_responded': formatted_time(time_res)
         })
