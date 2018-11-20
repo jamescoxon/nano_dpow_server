@@ -4,7 +4,7 @@ import configparser
 from threading import Thread
 
 def formatted_time(t):
-    return t.strftime("%Y-%m-%d %H:%M:%S.{:d}".format(int(t.microsecond/1e4)))
+    return t.strftime("%Y-%m-%d %H:%M:%S.{:d}".format(int(t.microsecond/1e3)))
 
 
 def post_js(js, uri):
