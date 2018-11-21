@@ -659,11 +659,14 @@ def setup_db():
 @gen.coroutine
 def update_interface_clients():
     connected_clients = get_all_clients()
+    seen = set()
+    unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
+
     clients = list(map(lambda c: {
         'client_id': c.address,
         'client_address': c.address,
         'client_type': c.type
-    }, connected_clients))
+    }, unique_clients_by_account))
 
     interface.clients_update(clients)
     print_time_debug("Updated interface clients")
