@@ -104,6 +104,7 @@ def remove_from_timeout(client):
 def get_all_clients():
     return set( wss_demand + wss_precache )
 
+
 def build_blacklist(filepath='blacklist.txt'):
     try:
         with open(filepath, 'r') as f:
@@ -119,6 +120,32 @@ def build_blacklist(filepath='blacklist.txt'):
     return blacklist
 
 
+# TODO we would like to not have to use this at all, once all services provide the account
+def get_account_from_hash(hash_hex):
+    """Returns tuple (account,is_open_block)"""
+
+    get_account = '{ "action" : "block_account", "hash" : "%s"}' % hash_hex
+    print_time_debug("action block_account request:\n{}".format(get_account))
+    r = requests.post(rai_node_address, data=get_account)
+    print_time_debug("action block_account response:\n{}".format(r.text))
+
+    resulting_data = r.json()
+    if 'account' in resulting_data:
+        account = resulting_data['account'].replace('nano_','xrb_')
+        return (account, False)
+    elif 'error' in resulting_data:
+        if resulting_data['error'] == 'Block not found':
+            # This maybe a public key for an Open Block, convert to xrb address
+            print_time("Open Block")
+            account = nano.hex_to_account(hash_hex)
+            print_time("The account is {}".format(account))
+            return (account, True)
+        else:  # other errors, for instance invalid hash
+            return ('Error', None)
+    else:
+        return ('Error', None)
+
+
 class WorkState(Enum):
     needs = "0"
     doing = "1"
@@ -127,34 +154,6 @@ class WorkState(Enum):
 class Work(tornado.web.RequestHandler):
     def data_received(self, chunk):
         pass
-
-    @gen.coroutine
-    def account_xrb(self, hex_acc):
-        raise gen.Return(nano.hex_to_account(hex_acc))
-
-    @gen.coroutine
-    def get_account_from_hash(self, hash_hex):
-
-        get_account = '{ "action" : "block_account", "hash" : "%s"}' % hash_hex
-        print_time_debug("action block_account request:\n{}".format(get_account))
-        r = requests.post(rai_node_address, data=get_account)
-        print_time_debug("action block_account response:\n{}".format(r.text))
-
-        resulting_data = r.json()
-        if 'account' in resulting_data:
-            account = resulting_data['account'].replace('nano_','xrb_')
-            raise gen.Return((account, False))
-        elif 'error' in resulting_data:
-            if resulting_data['error'] == 'Block not found':
-                # This maybe a public key for an Open Block, convert to xrb address
-                print_time("Open Block")
-                account = yield self.account_xrb(hash_hex)
-                print_time("The account is {}".format(account))
-                raise gen.Return((account, True))
-            else:  # other errors, for instance invalid hash
-                raise gen.Return(('Error', None))
-        else:
-            raise gen.Return(('Error', None))
 
     @gen.coroutine
     def ws_demand(self, message):
@@ -305,7 +304,7 @@ class Work(tornado.web.RequestHandler):
             print_time_debug('NOTIFY SERVICE! Ask to provide accounts')
 
             # Get account to setup DB entries and check if invalid hash
-            account, is_open_block = yield self.get_account_from_hash(hash_hex)
+            account, is_open_block = get_account_from_hash(hash_hex)
             if account == 'Error':
                 return_json = '{"status" : "bad hash"}'
                 print_time(return_json)
@@ -608,9 +607,6 @@ def precache_update():
         try:
             user = yield precache_data.next()
             count_updates = count_updates + 1
-            get_frontier = '{ "action" : "account_info", "account" : "%s" }' % user['account']
-            r = requests.post(rai_node_address, data=get_frontier)
-            results = r.json()
             if user['work'] == WorkState.doing.value:
                 # Reset work as taken too long
                 work_count = work_count + 1
@@ -619,57 +615,59 @@ def precache_update():
                     {"work": WorkState.needs.value}).run(conn)
                 if user['hash'] not in hash_to_precache:
                     hash_to_precache.append(user['hash'])
-            elif results['frontier'] == user['hash']:
-                up_to_date = up_to_date + 1
-                if user['work'] == WorkState.needs.value:
-                    if user['hash'] not in hash_to_precache:
-                        not_in_queue = not_in_queue + 1
-                        #                     print_time('hash not in queue, adding')
+                continue
+
+            get_frontier = '{ "action" : "account_info", "account" : "%s" }' % user['account']
+            r = requests.post(rai_node_address, data=get_frontier)
+            results = r.json()
+            if 'frontier' in results:
+                if results['frontier'] == user['hash']:
+                    up_to_date = up_to_date + 1
+                    if user['work'] == WorkState.needs.value:
                         if user['hash'] not in hash_to_precache:
+                            not_in_queue = not_in_queue + 1
                             hash_to_precache.append(user['hash'])
+                else:
+                    not_up_to_data = not_up_to_data + 1
+                    if user['hash'] not in hash_to_precache:
+                        hash_to_precache.append(user['hash'])
+                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
+                        {"work": WorkState.needs.value, "hash": results['frontier']}).run(conn)
             else:
-                not_up_to_data = not_up_to_data + 1
-                #             print_time("%s : Not upto date, precache" % user['account'])
-                if user['hash'] not in hash_to_precache:
-                    hash_to_precache.append(user['hash'])
-                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
-                    {"work": WorkState.needs.value, "hash": results['frontier']}).run(conn)
-        except Exception as e:
-            print_time_debug(e)
-            try:
+                # TODO once all services provide account, this cant be an open block, so simply delete entry from DB
+                print_time('Checking to see if it is a case of a mistaken open block')
                 print_time_debug(get_frontier)
                 print_time_debug(results)
-            except:
-                pass
-            print_time('Checking to see if it is a case of a mistaken open block')
 
-            # In this error, perhaps the system mistakenly added as an open block, when the node simply didn't have that block yet.
-            # in that case, the next RPC will return a valid account now, and not error
-            account, is_open_block = yield self.get_account_from_hash(user['hash'])
-            if account != 'Error' and not is_open_block:
-                print_time('Hash now corresponds to an account, deleting last entry and setting up another for precache')
-                print_time("Deleting %s" % user['id'])
-                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
+                # In this error, perhaps the system mistakenly added as an open block, when the node simply didn't have that block yet.
+                # in that case, the next RPC will return a valid account now, and not error
+                account, is_open_block = get_account_from_hash(user['hash'])
+                if account != 'Error' and not is_open_block:
+                    print_time('Hash now corresponds to an account, deleting last entry and setting up another for precache')
+                    print_time("Deleting %s" % user['id'])
+                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
 
-                # Add to precache
+                    # Add to precache
 
-                # Get appropriate threshold value
-                # TODO what is a good threshold value for precaching?
-                multiplier = 1.0
-                threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
-                threshold_str = nano.threshold_to_str(threshold)
+                    # Get appropriate threshold value
+                    # TODO what is a good threshold value for precaching?
+                    multiplier = 1.0
+                    threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
+                    threshold_str = nano.threshold_to_str(threshold)
 
-                yield rethinkdb.db("pow").table("hashes").insert(
-                    {"account": account, "hash": user['hash'], "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
+                    yield rethinkdb.db("pow").table("hashes").insert(
+                        {"account": account, "hash": user['hash'], "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
 
-                hash_to_precache.append(user['hash'])
+                    hash_to_precache.append(user['hash'])
 
-            else:  # 'error' or otherwise:
-                print_time('Still no valid account, deleting entry completely from DB')
-                delete_error = delete_error + 1
-                print_time("Deleting %s" % user['id'])
-                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
+                else:  # 'error' or otherwise:
+                    print_time('Still no valid account, deleting entry completely from DB')
+                    delete_error = delete_error + 1
+                    print_time("Deleting %s" % user['id'])
+                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
 
+        except Exception as e:
+            print_time_debug(e)
 
     print_time("Count: {:d}, Work: {:d}, Up to date:  {:d}, Not in queue: {:d}, Not up to date: {:d}, Delete error: {:d}".format(
                 count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
