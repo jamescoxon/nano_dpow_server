@@ -141,19 +141,19 @@ class Work(tornado.web.RequestHandler):
 
         resulting_data = r.json()
         if 'account' in resulting_data:
-            account = resulting_data['account']
-            raise gen.Return(account)
+            account = resulting_data['account'].replace('nano_','xrb_')
+            raise gen.Return((account, False))
         elif 'error' in resulting_data:
             if resulting_data['error'] == 'Block not found':
                 # This maybe a public key for an Open Block, convert to xrb address
                 print_time("Open Block")
                 account = yield self.account_xrb(hash_hex)
                 print_time("The account is {}".format(account))
-                raise gen.Return(account)
+                raise gen.Return((account, True))
             else:  # other errors, for instance invalid hash
-                raise gen.Return('Error')
+                raise gen.Return(('Error', None))
         else:
-            raise gen.Return('Error')
+            raise gen.Return(('Error', None))
 
     @gen.coroutine
     def ws_demand(self, message):
@@ -176,13 +176,14 @@ class Work(tornado.web.RequestHandler):
         return None
 
     @gen.coroutine
-    def get_work_via_ws(self, hash_hex):
+    def get_work_via_ws(self, hash_hex, account=None):
         conn = yield connection
 
-        # Get account to setup DB entries and check if invalid hash
-        account = yield self.get_account_from_hash(hash_hex)
-        if account == 'Error':
-            raise gen.Return(('bad hash', None, None))
+        if not account:
+            # Get account to setup DB entries and check if invalid hash
+            account, is_open_block = yield self.get_account_from_hash(hash_hex)
+            if account == 'Error':
+                raise gen.Return(('bad hash', None, None))
 
         # Get appropriate threshold value
         # TODO after prioritization PoW is implemented, calculate here an appropriate multiplier
@@ -260,8 +261,8 @@ class Work(tornado.web.RequestHandler):
 
     @gen.coroutine
     def post(self):
-        post_data = json.loads(self.request.body.decode('utf-8'))
         receive_time = datetime.datetime.now(timezone)
+        post_data = json.loads(self.request.body.decode('utf-8'))
         if 'hash' in post_data:
             hash_hex = post_data['hash'].upper()
         else:
@@ -286,35 +287,48 @@ class Work(tornado.web.RequestHandler):
                 return
             else:
                 print_time("Correct API key from %s - continue" % service_data['username'])
-                new_count = int(service_data['count']) + 1
-                yield rethinkdb.db("pow").table("api_keys").filter(rethinkdb.row['api_key'] == key_hashed).update(
-                    {"count": new_count}).run(conn)
         else:
             print_time("no API key")
             return_json = '{"status" : "no key"}'
             print_time(return_json)
             self.write(return_json)
             return
-        # 2 Do we have hash in db?
+
+        # 2 Do they provide the account besides the hash?
+        account = post_data.get('account') or None
+        if account:
+            print_time('Account provided: {}'.format(account))
+            account = account.replace('nano_','xrb_')
+            if account.find('xrb_') == -1:
+                print_time_debug('NOTIFY SERVICE! Invalid account provided {}'.format(account))
+                account = None
+        else:
+            print_time_debug('NOTIFY SERVICE! Ask to provide accounts')
+
+        # Update entry
+        new_count = int(service_data['count']) + 1
+        yield rethinkdb.db("pow").table("api_keys").filter(rethinkdb.row['api_key'] == key_hashed).update(
+            {"count": new_count, "provides_accounts": account!=None}).run(conn)
+
+        # 3 Do we have hash in db? If not (or work is not provided) handle on demand
         hash_data = yield rethinkdb.db("pow").table("hashes").filter({"hash": hash_hex}).nth(0).default(False).run(conn)
         if hash_data:
             print_time('Found cached work value %s' % hash_data['work'])
             work_output = hash_data['work']
             if work_output == WorkState.needs.value or work_output == WorkState.doing.value:
-                print_time("Empty work, get new")
-                work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex)
+                print_time("Empty work, get new on demand")
+                work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex, account=account)
                 work_type = 'O'
             else:
-                work_type = 'P'
                 client_id = hash_data.get('last_worker') or None
                 if 'threshold' in hash_data:
                     multiplier = nano.to_multiplier(nano.NANO_DIFFICULTY, nano.threshold_from_str(hash_data['threshold']))
                 else:
                     multiplier = 1.0
+                work_type = 'P'
         else:
-            # 3 If not then request pow via websockets
             print_time('Not in DB, getting on demand...')
-            work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex)
+            work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex, account=account)
             work_type = 'O'
 
         complete_time = datetime.datetime.now(timezone)
@@ -541,8 +555,7 @@ def push_precache():
                             print_time("Failed to remove hash from precache list: {}".format(e))
                             pass
                         break
-            #                  else:
-            #                           print_time(str(work_clients) + " already in use")
+
             except Exception as e:
                 print_time('Error when sending via WS precache: {}'.format(e))
                 if work_clients in wss_precache:
@@ -609,13 +622,9 @@ def precache_update():
 
             # In this error, perhaps the system mistakenly added as an open block, when the node simply didn't have that block yet.
             # in that case, the next RPC will return a valid account now, and not error
-            get_account = '{ "action" : "block_account", "hash" : "%s"}' % user['hash']
-            r = requests.post(rai_node_address, data=get_account)
-            account_data = r.json()
-
-            if 'account' in account_data:
-                print_time('Found an account for a new account, deleting last entry and setting up another for precache')
-
+            account, is_open_block = yield self.get_account_from_hash(user['hash'])
+            if account != 'Error' and not is_open_block:
+                print_time('Hash now corresponds to an account, deleting last entry and setting up another for precache')
                 print_time("Deleting %s" % user['id'])
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
 
@@ -628,7 +637,7 @@ def precache_update():
                 threshold_str = nano.threshold_to_str(threshold)
 
                 yield rethinkdb.db("pow").table("hashes").insert(
-                    {"account": account_data['account'], "hash": user['hash'], "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
+                    {"account": account, "hash": user['hash'], "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
 
                 hash_to_precache.append(user['hash'])
 
