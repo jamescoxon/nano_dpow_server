@@ -177,14 +177,8 @@ class Work(tornado.web.RequestHandler):
         return None
 
     @gen.coroutine
-    def get_work_via_ws(self, hash_hex, account=None):
+    def get_work_via_ws(self, hash_hex, account, new_entry=False):
         conn = yield connection
-
-        if not account:
-            # Get account to setup DB entries and check if invalid hash
-            account, is_open_block = yield self.get_account_from_hash(hash_hex)
-            if account == 'Error':
-                raise gen.Return(('bad hash', None, None))
 
         # Get appropriate threshold value
         # TODO after prioritization PoW is implemented, calculate here an appropriate multiplier
@@ -192,6 +186,10 @@ class Work(tornado.web.RequestHandler):
         threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
         threshold_str = nano.threshold_to_str(threshold)
 
+        if new_entry:
+            # Insert new entry to be updated when work is returned by client
+            yield rethinkdb.db("pow").table("hashes").insert(
+                {"account": account, "hash": hash_hex, "work": WorkState.doing.value, "threshold": threshold_str}).run(conn)
 
         # Try up to 2 times, sending work to another client if the first fails
         error = None
@@ -306,10 +304,18 @@ class Work(tornado.web.RequestHandler):
         else:
             print_time_debug('NOTIFY SERVICE! Ask to provide accounts')
 
+            # Get account to setup DB entries and check if invalid hash
+            account, is_open_block = yield self.get_account_from_hash(hash_hex)
+            if account == 'Error':
+                return_json = '{"status" : "bad hash"}'
+                print_time(return_json)
+                self.write(return_json)
+                return
+
         # Update entry
         new_count = int(service_data['count']) + 1
         yield rethinkdb.db("pow").table("api_keys").filter(rethinkdb.row['api_key'] == key_hashed).update(
-            {"count": new_count, "provides_accounts": account!=None}).run(conn)
+            {"count": new_count, "provides_accounts": post_data.get('account')!=None}).run(conn)
 
         # 3 Do we have hash in db? If not (or work is not provided) handle on demand
         hash_data = yield rethinkdb.db("pow").table("hashes").filter({"hash": hash_hex}).nth(0).default(False).run(conn)
@@ -318,7 +324,7 @@ class Work(tornado.web.RequestHandler):
             work_output = hash_data['work']
             if work_output == WorkState.needs.value or work_output == WorkState.doing.value:
                 print_time("Empty work, get new on demand")
-                work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex, account=account)
+                work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex, account, new_entry=False)
                 work_type = 'O'
             else:
                 client_id = hash_data.get('last_worker') or None
@@ -329,13 +335,14 @@ class Work(tornado.web.RequestHandler):
                 work_type = 'P'
         else:
             print_time('Not in DB, getting on demand...')
-            work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex, account=account)
+            work_output, client_id, multiplier = yield self.get_work_via_ws(hash_hex, account, new_entry=True)
             work_type = 'O'
+
 
         complete_time = datetime.datetime.now(timezone)
 
         # 4 Return work
-        if work_output in ['timeout', 'no clients', 'bad hash', 'error']:
+        if work_output in ['timeout', 'no clients', 'error']:
             return_json = '{"status" : "%s"}' % work_output
             work_ok = False
         else:
