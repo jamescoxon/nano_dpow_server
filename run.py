@@ -27,6 +27,7 @@ import tornado.websocket
 import tornado.ioloop
 import tornado.web
 from tornado import gen
+import logging
 import socket
 import requests
 import json
@@ -350,6 +351,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         self.id = WSHandler.worker_counter
         self.type = ''
         self.address = ''
+        self.ip = ''
         super().__init__(*args, **kwargs)
 
     def __repr__(self):
@@ -368,6 +370,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def open(self):
         print_time('New worker connected - {}'.format(self.id))
+        self.ip = self.request.remote_ip
+        print_time('IP: {}'.format(self.ip))
 
     @gen.coroutine
     def on_message(self, message):
@@ -380,6 +384,20 @@ class WSHandler(tornado.websocket.WebSocketHandler):
             self.address = ws_data['address']
 
             if 'work_type' in ws_data:
+                # Setup message handling
+
+                # remove from any lists
+                self.remove_from_lists()
+
+                # restrict clients per IP
+                connected_clients = get_all_clients()
+                same_ip = list(filter(lambda c: c.ip == self.ip, connected_clients))
+                if len(same_ip) >= 2:  # this client is not yet in the lists
+                    print_time("Client attempted to connect more than 2 clients: IP: {} , already in list: {} , new client: {}".format(self.ip, same_ip, self))
+                    self.write_message('{"status": "error", "description": "Maximum of 2 clients allowed"}')
+                    self.close()
+                    return
+
                 # handle setup message for work type
                 if ws_data['address'] in blacklist:
                     print("Blacklisted: {}".format(ws_data['address']))
@@ -462,8 +480,6 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 pass
 
     def update_work_type(self, work_type):
-        # remove from any lists
-        self.remove_from_lists()
 
         if work_type == 'any':
             # Add to both demand and precache
