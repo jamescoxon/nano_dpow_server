@@ -705,7 +705,7 @@ def update_interface_clients():
         counts_by_type[client_data["account"]] = {"precache": client_data["precache_count"], "urgent": client_data["urgent_count"]}
 
     clients = list(map(lambda c: {
-        'client_id': c.address,
+        'client_id': c.address+'_'+c.type,
         'client_address': c.address,
         'client_type': c.type,
         'client_demand_count': counts_by_type[c.address]["urgent"],
