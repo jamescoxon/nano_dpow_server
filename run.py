@@ -460,8 +460,14 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     if hash_hex in hash_to_precache:
                         hash_to_precache.remove(hash_hex)
 
-                    # Update the work tracker so that the service wait loop knows it is done
-                    work_tracker[hash_hex] = (work, payout_account)
+                    # If it was in work_tracker, then it's urgent work, else precache
+                    if work_tracker.get(hash_hex) != None:
+                        update_count_type = 'urgent'
+
+                        # Update the work tracker so that the service wait loop knows it is done
+                        work_tracker[hash_hex] = (work, payout_account)
+                    else:
+                        update_count_type = 'precache'
 
                     # Add work record to client database to allow payouts
                     clients_data = yield rethinkdb.db("pow").table("clients").filter(
@@ -469,13 +475,13 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     if clients_data:
                         client = clients_data
                         count = int(client['count'])
-                        total_count = count + 1
+                        count_type = int(client['{}_count'.format(update_count_type)])
                         yield rethinkdb.db("pow").table("clients").filter(
                             rethinkdb.row['account'] == payout_account).update(
-                            {"count": total_count, "time": time.time()}).run(conn)
+                                {"count": count + 1, "{}_count".format(update_count_type): count_type + 1, "time": time.time()}).run(conn)
                     else:
                         yield rethinkdb.db("pow").table("clients").insert(
-                            {"account": payout_account, "count": 1, "time": time.time()}).run(conn)
+                            {"account": payout_account, "count": 1, "{}_count".format(update_count_type): 1, "time": time.time()}).run(conn)
 
                     # Remove from work list
                     if self in wss_work:
