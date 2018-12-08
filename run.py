@@ -551,7 +551,7 @@ application = tornado.web.Application([
 def push_precache():
   global update_lock
   print("Global update_lock: {}".format(update_lock))
-  if update_lock == 0:
+  if update_lock < 2:
     print("\nPre Hash to precache: {} {}".format(len(hash_to_precache), hash_to_precache))
     hash_count = 0
     work_count = 0
@@ -618,6 +618,7 @@ def push_precache():
 @gen.coroutine
 def precache_update():
   global update_lock
+  global hash_to_precache
   if update_lock == 0:
     update_lock = 1
     count_updates = 0
@@ -626,6 +627,7 @@ def precache_update():
     not_in_queue = 0
     not_up_to_data = 0
     delete_error = 0
+    local_hash_to_precache = hash_to_precache.copy()
     conn = yield connection
     #   print_time("precache_update")
     precache_data = yield rethinkdb.db("pow").table("hashes").run(conn)
@@ -640,8 +642,8 @@ def precache_update():
                 #             print_time("%s : Request too long, reset" % user['account'])
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
                     {"work": WorkState.needs.value}).run(conn)
-                if user['hash'] not in hash_to_precache:
-                    hash_to_precache.append(user['hash'])
+                if user['hash'] not in local_hash_to_precache:
+                    local_hash_to_precache.append(user['hash'])
                 continue
 
             get_frontier = '{ "action" : "account_info", "account" : "%s" }' % user['account']
@@ -651,13 +653,13 @@ def precache_update():
                 if results['frontier'] == user['hash']:
                     up_to_date = up_to_date + 1
                     if user['work'] == WorkState.needs.value:
-                        if user['hash'] not in hash_to_precache:
+                        if user['hash'] not in local_hash_to_precache:
                             not_in_queue = not_in_queue + 1
-                            hash_to_precache.append(user['hash'])
+                            local_hash_to_precache.append(user['hash'])
                 else:
                     not_up_to_data = not_up_to_data + 1
-                    if user['hash'] not in hash_to_precache:
-                        hash_to_precache.append(user['hash'])
+                    if user['hash'] not in local_hash_to_precache:
+                        local_hash_to_precache.append(user['hash'])
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
                         {"work": WorkState.needs.value, "hash": results['frontier']}).run(conn)
             else:
@@ -685,7 +687,7 @@ def precache_update():
                     yield rethinkdb.db("pow").table("hashes").insert(
                         {"account": account, "hash": user['hash'], "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
 
-                    hash_to_precache.append(user['hash'])
+                    local_hash_to_precache.append(user['hash'])
 
                 else:  # 'error' or otherwise:
                     print_time('Still no valid account, deleting entry completely from DB')
@@ -700,6 +702,7 @@ def precache_update():
                 count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
     print_lists(work=1, precache=1, demand=1, timeout=1)
     update_lock = 0
+    hash_to_precache = local_hash_to_precache.copy()
   else:
     print("Can't update as locked")
 
