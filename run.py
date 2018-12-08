@@ -694,6 +694,7 @@ def setup_db():
 
 @gen.coroutine
 def update_interface_clients():
+    conn = yield connection
     connected_clients = get_all_clients()
     seen = set()
     unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
