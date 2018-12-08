@@ -460,8 +460,14 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     if hash_hex in hash_to_precache:
                         hash_to_precache.remove(hash_hex)
 
-                    # Update the work tracker so that the service wait loop knows it is done
-                    work_tracker[hash_hex] = (work, payout_account)
+                    # If it was in work_tracker, then it's urgent work, else precache
+                    if work_tracker.get(hash_hex) != None:
+                        update_count_type = 'urgent'
+
+                        # Update the work tracker so that the service wait loop knows it is done
+                        work_tracker[hash_hex] = (work, payout_account)
+                    else:
+                        update_count_type = 'precache'
 
                     # Add work record to client database to allow payouts
                     clients_data = yield rethinkdb.db("pow").table("clients").filter(
@@ -469,13 +475,13 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     if clients_data:
                         client = clients_data
                         count = int(client['count'])
-                        total_count = count + 1
+                        count_type = int(client['{}_count'.format(update_count_type)])
                         yield rethinkdb.db("pow").table("clients").filter(
                             rethinkdb.row['account'] == payout_account).update(
-                            {"count": total_count, "time": time.time()}).run(conn)
+                                {"count": count + 1, "{}_count".format(update_count_type): count_type + 1, "time": time.time()}).run(conn)
                     else:
                         yield rethinkdb.db("pow").table("clients").insert(
-                            {"account": payout_account, "count": 1, "time": time.time()}).run(conn)
+                            {"account": payout_account, "count": 1, "{}_count".format(update_count_type): 1, "time": time.time()}).run(conn)
 
                     # Remove from work list
                     if self in wss_work:
@@ -691,11 +697,19 @@ def update_interface_clients():
     connected_clients = get_all_clients()
     seen = set()
     unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
+    accounts = [c.address for c in unique_clients_by_account]
+    data = yield rethinkdb.db("pow").table("clients").filter(rethinkdb.row["account"] in accounts).run(conn)
+
+    counts_by_type = dict()
+    for client_data in data.items:
+        counts_by_type[client_data["account"]] = {"precache": client_data["precache_count"], "urgent": client_data["urgent_count"]}
 
     clients = list(map(lambda c: {
-        'client_id': c.address,
+        'client_id': c.address+'_'+c.type,
         'client_address': c.address,
-        'client_type': c.type
+        'client_type': c.type,
+        'client_demand_count': counts_by_type[c.address]["urgent"],
+        'client_precache_count': counts_by_type[c.address]["precache"]
     }, unique_clients_by_account))
 
     interface.clients_update(clients)
