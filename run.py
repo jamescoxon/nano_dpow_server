@@ -550,21 +550,29 @@ def push_precache():
     threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
     threshold_str = nano.threshold_to_str(threshold)
 
-    for hash_hex in hash_to_precache:
-        hash_count = hash_count + 1
+    if hash_to_precache:
         print_time("Got precache work to push")
         random.shuffle(wss_precache)
-        print_lists(work=1, precache=1, timeout=1)
+        print_lists(work=1, precache=1)
+        # if all precachers are doing work... no free workers
+        if set(wss_precache).issubset(set(wss_work)):
+            print_time("No clients available to push precache")
+            return
+
+
+    for hash_hex in hash_to_precache:
+        hash_count = hash_count + 1
         hash_handled = False
         for work_clients in wss_precache:  # type: WSHandler
             print_time("Sending via WS Precache")
+            print_lists(work=1, precache=1)
             try:
                 if not work_clients.ws_connection.stream.socket:
                     print_time("Web socket does not exist anymore!!!")
                     wss_precache.remove(work_clients)
                     wss_work.remove(work_clients)
                 else:
-                    if work_clients not in wss_work and work_clients not in wss_timeout:
+                    if work_clients not in wss_work:
                         work_count = work_count + 1
                         message = '{"hash" : "%s", "type" : "precache", "threshold" : "%s"}' % (hash_hex, threshold_str)
                         work_clients.write_message(message)
@@ -590,6 +598,7 @@ def push_precache():
             print_time("Hash was given to a precache client")
         else:
             print_time("Precache not handled - no free workers?")
+            break
 
 
 @gen.coroutine
