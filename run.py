@@ -65,6 +65,8 @@ blacklist = {}
 
 worker_counter = 0
 
+update_lock = 0
+
 rethinkdb.set_loop_type("tornado")
 connection = rethinkdb.connect("localhost", 28015)
 
@@ -547,6 +549,10 @@ application = tornado.web.Application([
 
 @gen.coroutine
 def push_precache():
+  global update_lock
+  print("Global update_lock: {}".format(update_lock))
+  if update_lock == 0:
+    print("\nPre Hash to precache: {} {}".format(len(hash_to_precache), hash_to_precache))
     hash_count = 0
     work_count = 0
 
@@ -605,10 +611,15 @@ def push_precache():
         else:
             print_time("Precache not handled - no free workers?")
             break
-
+    print("\nPost1 Hash to precache: {} {}".format(len(hash_to_precache), hash_to_precache))
+  else:
+    print("Update - busy")
 
 @gen.coroutine
 def precache_update():
+  global update_lock
+  if update_lock == 0:
+    update_lock = 1
     count_updates = 0
     work_count = 0
     up_to_date = 0
@@ -622,6 +633,7 @@ def precache_update():
         try:
             user = yield precache_data.next()
             count_updates = count_updates + 1
+            print("Count Updates: {}".format(count_updates))
             if user['work'] == WorkState.doing.value:
                 # Reset work as taken too long
                 work_count = work_count + 1
@@ -687,10 +699,15 @@ def precache_update():
     print_time("Count: {:d}, Work: {:d}, Up to date:  {:d}, Not in queue: {:d}, Not up to date: {:d}, Delete error: {:d}".format(
                 count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
     print_lists(work=1, precache=1, demand=1, timeout=1)
-
+    update_lock = 0
+  else:
+    print("Can't update as locked")
 
 @gen.coroutine
 def setup_db():
+    global update_lock
+    update_lock = 0
+
     print_time("Update DB")
     conn = yield connection
     data = yield rethinkdb.db("pow").table("hashes").run(conn)
@@ -763,7 +780,7 @@ if __name__ == "__main__":
     blacklist = build_blacklist('blacklist.txt')
 
     print_time('*** Websocket Server Started at %s***' % myIP)
-    pc = tornado.ioloop.PeriodicCallback(precache_update, 30000)
+    pc = tornado.ioloop.PeriodicCallback(precache_update, 300000)
     pc.start()
     push = tornado.ioloop.PeriodicCallback(push_precache, 5000)
     push.start()
