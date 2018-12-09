@@ -705,9 +705,9 @@ def setup_db():
 def update_interface_clients():
     conn = yield connection
     connected_clients = get_all_clients()
-    seen = set()
-    unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
-    accounts = [c.address for c in unique_clients_by_account]
+    # seen = set()
+    # unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
+    accounts = [c.address for c in connected_clients]
     data = yield rethinkdb.db("pow").table("clients").filter(rethinkdb.row["account"] in accounts).run(conn)
 
     counts_by_type = dict()
@@ -720,7 +720,7 @@ def update_interface_clients():
         'client_type': c.type,
         'client_demand_count': counts_by_type[c.address]["urgent"],
         'client_precache_count': counts_by_type[c.address]["precache"]
-    }, unique_clients_by_account))
+    }, connected_clients))
 
     interface.clients_update(clients)
     print_time_debug("Updated interface clients")
