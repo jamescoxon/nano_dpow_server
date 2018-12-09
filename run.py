@@ -648,8 +648,12 @@ def precache_update():
     print(len(precache_data_list))
     # organize DB data efficiently
     #precache_data_list = list(precache_data)
-    account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data_list}
-    accounts = list(account_to_hash.keys())
+    #account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data_list}
+    accounts = []
+    for d in precache_data_list:
+        accounts.append(d['account'])
+
+#    accounts = list(account_to_hash.keys())
 
     print()
     print(len(accounts))
