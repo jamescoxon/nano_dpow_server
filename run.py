@@ -675,6 +675,12 @@ def precache_update():
                     too_old += 1
                     precache_work_tracker.pop(time_sent)
                     hash_to_precache.append(old_hash)
+            else:
+                if work == WorkState.needs.value or work == WorkState.doing.value:
+                    # this was precache work left undone since the last server restart
+                    if old_hash not in hash_to_precache:
+                        hash_to_precache.append(old_hash)
+
         else:
             not_up_to_date = not_up_to_date + 1
             if frontier not in hash_to_precache:
@@ -693,7 +699,7 @@ def precache_update():
     print_time("Count: {:d}, No frontier: {:d}, Up to date: {:d}, Too old: {:d}, Not up to date: {:d}".format(
                 count_updates, count_updates-up_to_date, up_to_date, too_old, not_up_to_date))
 
-    print_time_debug("precache_update took: {} seconds".format(time.time()-t_start))
+    print_time_debug("precache_update took: {:.4f} seconds".format(time.time()-t_start))
 
 
 @gen.coroutine
