@@ -61,6 +61,8 @@ wss_work = []
 wss_timeout = []
 hash_to_precache = []
 work_tracker = {}
+precache_work_tracker = {}
+old_hashes = []
 blacklist = {}
 
 worker_counter = 0
@@ -442,6 +444,27 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 if work == 'error':
                     raise Exception("'Something wrong with the client, work returned as error'")
 
+                if hash_hex in work_tracker:
+                    this_work_type = 'urgent'
+                    # dont remove urgent from work tracker, will need to update it later
+                elif hash_hex in precache_work_tracker:
+                    this_work_type = 'precache'
+                    precache_work_tracker.pop(hash_hex)
+                else:
+                    print_time("Work was given for hash {} but this hash was not in any of the work trackers".format(hash_hex))
+                    if hash_hex in old_hashes:
+                        print_time("Hash was an old hash given to this client, we should still increase client count but not update the account entry")
+                        clients_data = yield rethinkdb.db("pow").table("clients").filter(
+                            rethinkdb.row['account'] == payout_account).nth(0).default(False).run(conn)
+                        if clients_data:
+                            client = clients_data
+                            count = int(client['count'])
+                            yield rethinkdb.db("pow").table("clients").filter(rethinkdb.row['account'] == payout_account).update(
+                                {"count": count + 1}).run(conn)
+                    else:
+                        print_time("Hash not in old_hashes, so could be a client trying to do fake work. Rejected and return here")
+                        return
+
                 # check the threshold at which this was computed
                 # defaults to NANO_DIFFICULTY if not found (e.g. early entries in DB)
                 conn = yield connection
@@ -457,17 +480,13 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 if valid:
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['hash'] == hash_hex).update(
                         {"work": work, "last_worker": payout_account}).run(conn)
+
                     if hash_hex in hash_to_precache:
                         hash_to_precache.remove(hash_hex)
 
-                    # If it was in work_tracker, then it's urgent work, else precache
-                    if work_tracker.get(hash_hex) != None:
-                        update_count_type = 'urgent'
-
+                    if this_work_type == 'urgent':
                         # Update the work tracker so that the service wait loop knows it is done
                         work_tracker[hash_hex] = (work, payout_account)
-                    else:
-                        update_count_type = 'precache'
 
                     # Add work record to client database to allow payouts
                     clients_data = yield rethinkdb.db("pow").table("clients").filter(
@@ -475,13 +494,13 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     if clients_data:
                         client = clients_data
                         count = int(client['count'])
-                        count_type = int(client['{}_count'.format(update_count_type)])
+                        count_type = int(client['{}_count'.format(this_work_type)])
                         yield rethinkdb.db("pow").table("clients").filter(
                             rethinkdb.row['account'] == payout_account).update(
-                                {"count": count + 1, "{}_count".format(update_count_type): count_type + 1, "time": time.time()}).run(conn)
+                                {"count": count + 1, "{}_count".format(this_work_type): count_type + 1, "time": time.time()}).run(conn)
                     else:
                         yield rethinkdb.db("pow").table("clients").insert(
-                            {"account": payout_account, "count": 1, "{}_count".format(update_count_type): 1, "time": time.time()}).run(conn)
+                            {"account": payout_account, "count": 1, "{}_count".format(this_work_type): 1, "time": time.time()}).run(conn)
 
                     # Remove from work list
                     if self in wss_work:
@@ -582,14 +601,11 @@ def push_precache():
                         work_count = work_count + 1
                         message = '{"hash" : "%s", "type" : "precache", "threshold" : "%s"}' % (hash_hex, threshold_str)
                         work_clients.write_message(message)
-                        wss_work.append(work_clients)
                         print_time_debug(message)
-                        try:
-                            hash_to_precache.remove(hash_hex)
-                            hash_handled = True
-                        except Exception as e:
-                            print_time("Failed to remove hash from precache list: {}".format(e))
-                            pass
+                        wss_work.append(work_clients)
+                        hash_to_precache.remove(hash_hex)
+                        precache_work_tracker[hash_hex] = time.time()
+                        hash_handled = True
                         break
 
             except Exception as e:
@@ -609,84 +625,75 @@ def push_precache():
 
 @gen.coroutine
 def precache_update():
+    t_start = time.time()
     count_updates = 0
-    work_count = 0
     up_to_date = 0
-    not_in_queue = 0
-    not_up_to_data = 0
-    delete_error = 0
+    too_old = 0
+    not_up_to_date = 0
     conn = yield connection
     #   print_time("precache_update")
     precache_data = yield rethinkdb.db("pow").table("hashes").run(conn)
-    while (yield precache_data.fetch_next()):
-        try:
-            user = yield precache_data.next()
-            count_updates = count_updates + 1
-            if user['work'] == WorkState.doing.value:
-                # Reset work as taken too long
-                work_count = work_count + 1
-                #             print_time("%s : Request too long, reset" % user['account'])
-                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
-                    {"work": WorkState.needs.value}).run(conn)
-                if user['hash'] not in hash_to_precache:
-                    hash_to_precache.append(user['hash'])
-                continue
+    if not precache_data:
+        print_time("Failed to retrieve data from DB in precache_update")
+        return
 
-            get_frontier = '{ "action" : "account_info", "account" : "%s" }' % user['account']
-            r = requests.post(rai_node_address, data=get_frontier)
-            results = r.json()
-            if 'frontier' in results:
-                if results['frontier'] == user['hash']:
-                    up_to_date = up_to_date + 1
-                    if user['work'] == WorkState.needs.value:
-                        if user['hash'] not in hash_to_precache:
-                            not_in_queue = not_in_queue + 1
-                            hash_to_precache.append(user['hash'])
-                else:
-                    not_up_to_data = not_up_to_data + 1
-                    if user['hash'] not in hash_to_precache:
-                        hash_to_precache.append(user['hash'])
-                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == user['account']).update(
-                        {"work": WorkState.needs.value, "hash": results['frontier']}).run(conn)
-            else:
-                # TODO once all services provide account, this cant be an open block, so simply delete entry from DB
-                print_time('Checking to see if it is a case of a mistaken open block')
-                print_time_debug(get_frontier)
-                print_time_debug(results)
+    # organize DB data efficiently
+    precache_data = precache_data.items
+    account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data}
+    accounts = list(account_to_hash.keys())
 
-                # In this error, perhaps the system mistakenly added as an open block, when the node simply didn't have that block yet.
-                # in that case, the next RPC will return a valid account now, and not error
-                account, is_open_block = get_account_from_hash(user['hash'])
-                if account != 'Error' and not is_open_block:
-                    print_time('Hash now corresponds to an account, deleting last entry and setting up another for precache')
-                    print_time("Deleting %s" % user['id'])
-                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
+    '''
+    Get frontiers for all accounts in a single RPC call
+    - if any account is not correct (wrong checksum), this will return an error - so it should be absolutely avoided
+    - if an account is valid but no frontier is found by the node, it is likely an open block
+    - since it could be simply that the "open account" block was not processed by the service, we will not be deleting open blocks here anymore
+    '''
+    # TODO if needed, then do a cleanup of wrong blocks every now and then, e.g. every 24h
 
-                    # Add to precache
+    get_frontiers = json.dumps({"action": "accounts_frontiers", "accounts": accounts})
+    r = requests.post(rai_node_address, data=get_frontiers)
+    frontiers = r.json()
+    if 'frontiers' not in frontiers:
+        print_time("Error getting account frontiers in precache_update: {}".format(frontiers))
+        return
 
-                    # Get appropriate threshold value
-                    # TODO what is a good threshold value for precaching?
-                    multiplier = 1.0
-                    threshold = nano.from_multiplier(nano.NANO_DIFFICULTY, multiplier)
-                    threshold_str = nano.threshold_to_str(threshold)
+    frontiers = frontiers['frontiers']
 
-                    yield rethinkdb.db("pow").table("hashes").insert(
-                        {"account": account, "hash": user['hash'], "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
+    # this code would get the open block mistakes
+    # open_block_mistakes = [a for a in accounts if a not in frontiers]
 
-                    hash_to_precache.append(user['hash'])
+    for account, frontier in frontiers.items():
+        count_updates += count_updates + 1
 
-                else:  # 'error' or otherwise:
-                    print_time('Still no valid account, deleting entry completely from DB')
-                    delete_error = delete_error + 1
-                    print_time("Deleting %s" % user['id'])
-                    yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['id'] == user['id']).delete().run(conn)
+        old_hash, work = account_to_hash[account]
+        if old_hash == frontier:
+            up_to_date = up_to_date + 1
+            if old_hash in precache_work_tracker:
+                time_sent = precache_work_tracker[old_hash]
+                if time.time() - time_sent > 1000.0:
+                    # probably client disconnected while doing precache work, we need to queue it again
+                    too_old += 1
+                    precache_work_tracker.pop(time_sent)
+                    hash_to_precache.append(old_hash)
+        else:
+            not_up_to_date = not_up_to_date + 1
+            if frontier not in hash_to_precache:
+                hash_to_precache.append(frontier)
+                if old_hash in precache_work_tracker:
+                    # even if returned, the hash will not be up-to-date, so better remove from tracking and reject it later
+                    precache_work_tracker.pop(old_hash)
 
-        except Exception as e:
-            print_time_debug(e)
+                    # add to a list of old hashes. since we asked the clients, we should update their count later
+                    old_hashes.append(old_hash)
 
-    print_time("Count: {:d}, Work: {:d}, Up to date:  {:d}, Not in queue: {:d}, Not up to date: {:d}, Delete error: {:d}".format(
-                count_updates, work_count, up_to_date, not_in_queue, not_up_to_data, delete_error))
-    print_lists(work=1, precache=1, demand=1, timeout=1)
+            # update DB
+            yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
+                {"work": WorkState.needs.value, "hash": frontier}).run(conn)
+
+    print_time("Count: {:d}, No frontier: {:d}, Up to date: {:d}, Too old: {:d}, Not up to date: {:d}".format(
+                count_updates, count_updates-up_to_date, up_to_date, too_old, not_up_to_date))
+
+    print_time_debug("precache_update took: {} seconds".format(time.time()-t_start))
 
 
 @gen.coroutine
@@ -763,7 +770,7 @@ if __name__ == "__main__":
     blacklist = build_blacklist('blacklist.txt')
 
     print_time('*** Websocket Server Started at %s***' % myIP)
-    pc = tornado.ioloop.PeriodicCallback(precache_update, 30000)
+    pc = tornado.ioloop.PeriodicCallback(precache_update, 10000)
     pc.start()
     push = tornado.ioloop.PeriodicCallback(push_precache, 5000)
     push.start()
