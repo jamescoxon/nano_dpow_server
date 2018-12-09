@@ -633,15 +633,27 @@ def precache_update():
     conn = yield connection
     #   print_time("precache_update")
     precache_data = yield rethinkdb.db("pow").table("hashes").run(conn)
+#    precache_data = rethinkdb.db("pow").table("hashes").run(conn)
     if not precache_data:
         print_time("Failed to retrieve data from DB in precache_update")
         return
+    count_precache = 0
+    precache_data_list = []
+    while (yield precache_data.fetch_next()):
+        item = yield precache_data.next()
+        precache_data_list.append(item)
+        count_precache += 1
 
+    print(count_precache)
+    print(len(precache_data_list))
     # organize DB data efficiently
-    precache_data = precache_data.items
-    account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data}
+    #precache_data_list = list(precache_data)
+    account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data_list}
     accounts = list(account_to_hash.keys())
 
+    print()
+    print(len(accounts))
+    print()
     '''
     Get frontiers for all accounts in a single RPC call
     - if any account is not correct (wrong checksum), this will return an error - so it should be absolutely avoided
@@ -663,11 +675,11 @@ def precache_update():
     # open_block_mistakes = [a for a in accounts if a not in frontiers]
 
     for account, frontier in frontiers.items():
-        count_updates += count_updates + 1
+        count_updates += 1
 
         old_hash, work = account_to_hash[account]
         if old_hash == frontier:
-            up_to_date = up_to_date + 1
+            up_to_date += 1
             if old_hash in precache_work_tracker:
                 time_sent = precache_work_tracker[old_hash]
                 if time.time() - time_sent > 1000.0:
@@ -682,7 +694,7 @@ def precache_update():
                         hash_to_precache.append(old_hash)
 
         else:
-            not_up_to_date = not_up_to_date + 1
+            not_up_to_date += 1
             if frontier not in hash_to_precache:
                 hash_to_precache.append(frontier)
                 if old_hash in precache_work_tracker:
