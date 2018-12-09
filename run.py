@@ -236,7 +236,7 @@ class Work(tornado.web.RequestHandler):
             client_to_timeout = send_result
             print_time("Placing {} in timeout for 3 minutes".format(client_to_timeout))
             wss_timeout.append(client_to_timeout)
-            tornado.ioloop.IOLoop.current().add_timeout(time.time() + 3*60, lambda: remove_from_timeout(client_to_timeout))
+            tornado.ioloop.IOLoop.current().add_timeout(time.time() + 120*60, lambda: remove_from_timeout(client_to_timeout))
 
         if error:
             # Mark account as needing work
@@ -718,9 +718,9 @@ def setup_db():
 def update_interface_clients():
     conn = yield connection
     connected_clients = get_all_clients()
-    seen = set()
-    unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
-    accounts = [c.address for c in unique_clients_by_account]
+    # seen = set()
+    # unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
+    accounts = [c.address for c in connected_clients]
     data = yield rethinkdb.db("pow").table("clients").filter(rethinkdb.row["account"] in accounts).run(conn)
 
     counts_by_type = dict()
@@ -733,7 +733,7 @@ def update_interface_clients():
         'client_type': c.type,
         'client_demand_count': counts_by_type[c.address]["urgent"],
         'client_precache_count': counts_by_type[c.address]["precache"]
-    }, unique_clients_by_account))
+    }, connected_clients))
 
     interface.clients_update(clients)
     print_time_debug("Updated interface clients")
