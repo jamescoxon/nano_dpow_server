@@ -234,7 +234,7 @@ class Work(tornado.web.RequestHandler):
             client_to_timeout = send_result
             print_time("Placing {} in timeout for 3 minutes".format(client_to_timeout))
             wss_timeout.append(client_to_timeout)
-            tornado.ioloop.IOLoop.current().add_timeout(time.time() + 3*60, lambda: remove_from_timeout(client_to_timeout))
+            tornado.ioloop.IOLoop.current().add_timeout(time.time() + 120*60, lambda: remove_from_timeout(client_to_timeout))
 
         if error:
             # Mark account as needing work
