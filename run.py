@@ -651,7 +651,8 @@ def precache_update():
     account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data_list}
     accounts = []
     for d in precache_data_list:
-        accounts.append(d['account'])
+        if d['account'] not in accounts:
+            accounts.append(d['account'])
 
 #    accounts = list(account_to_hash.keys())
 
