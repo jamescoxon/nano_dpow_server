@@ -251,7 +251,7 @@ class Work(tornado.web.RequestHandler):
             # Try updating, in case the account already exists in the DB
             changes = yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
                     {"hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
-            if not changes or changes['unchanged']:
+            if not changes or 0 == sum([v for k,v in changes.items()]):  # if all fields are zero, account was not in DB
                 # insert as new account
                 yield rethinkdb.db("pow").table("hashes").insert(
                     {"account": account, "hash": hash_hex, "work": WorkState.needs.value, "threshold": threshold_str}).run(conn)
