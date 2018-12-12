@@ -242,7 +242,7 @@ class Work(tornado.web.RequestHandler):
 
             # Took too long, add to timeout list
             client_to_timeout = send_result
-            print_time("Placing {} in timeout for 3 minutes".format(client_to_timeout))
+            print_time("Placing {} in timeout for 2 hours".format(client_to_timeout))
             wss_timeout.append(client_to_timeout)
             tornado.ioloop.IOLoop.current().add_timeout(time.time() + 120*60, lambda: remove_from_timeout(client_to_timeout))
 
@@ -417,7 +417,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 # Setup message handling
 
                 # remove from any lists
-                self.remove_from_lists()
+                self.remove_from_lists(timeout=True)
 
                 # restrict clients per IP
                 connected_clients = get_all_clients()
@@ -558,7 +558,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def on_close(self):
         print_time('Worker disconnected - {}'.format(self.id))
-        self.remove_from_lists()
+        self.remove_from_lists(timeout=True)
 
     def remove_from_lists(self, timeout=False):
         for l in [wss_work, wss_demand, wss_precache]:
@@ -608,8 +608,7 @@ def push_precache():
             try:
                 if not work_clients.ws_connection.stream.socket:
                     print_time("Web socket does not exist anymore!!!")
-                    wss_precache.remove(work_clients)
-                    wss_work.remove(work_clients)
+                    work_clients.remove_from_lists(timeout=True)
                     del work_clients
                 else:
                     if work_clients not in wss_work:
