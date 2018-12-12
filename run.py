@@ -104,7 +104,14 @@ def remove_from_timeout(client):
 
 
 def get_all_clients():
-    return set( wss_demand + wss_precache )
+    clients = set(wss_demand + wss_precache)
+    for client in clients:
+        if not client.ws_connection.stream.socket:
+            print("Removing client, socket is not active: {}".format(client))
+            client.remove_from_lists(timeout=True)
+            clients.remove(client)
+            del client
+    return clients
 
 
 def build_blacklist(filepath='blacklist.txt'):
@@ -167,7 +174,8 @@ class Work(tornado.web.RequestHandler):
         for ws in wss_demand:
             if not ws.ws_connection.stream.socket:
                 print_time("Web socket does not exist anymore!!!")
-                remove_from_lists(ws, timeout=True)
+                ws.remove_from_lists(timeout=True)
+                del ws
             else:
                 if ws not in wss_work and ws not in wss_timeout:
                     ws.write_message(message)
@@ -436,6 +444,10 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 if 'hash' not in ws_data or 'work' not in ws_data:
                     raise Exception('Incorrect data from client: {}'.format(ws_data))
 
+                if self not in wss_precache or self not in wss_demand:
+                    self.write_message('{"status": "error", "description": "Must setup first"}')
+                    return
+
                 # handle work message
                 hash_hex = ws_data['hash'].upper()
                 work = ws_data['work']
@@ -453,6 +465,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 else:
                     print_time("Work was given for hash {} but this hash was not in any of the work trackers".format(hash_hex))
                     if hash_hex in old_hashes:
+                        conn = yield connection
                         print_time("Hash was an old hash given to this client, we should still increase client count but not update the account entry")
                         clients_data = yield rethinkdb.db("pow").table("clients").filter(
                             rethinkdb.row['account'] == payout_account).nth(0).default(False).run(conn)
@@ -499,9 +512,10 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                             rethinkdb.row['account'] == payout_account).update(
                                 {"count": count + 1, "{}_count".format(this_work_type): count_type + 1, "time": time.time()}).run(conn)
                     else:
+                        other_work_type = 'urgent' if this_work_type == 'precache' else 'precache'
                         yield rethinkdb.db("pow").table("clients").insert(
-                            {"account": payout_account, "count": 1, "{}_count".format(this_work_type): 1, "time": time.time()}).run(conn)
-
+                               {"account": payout_account, "count": 1, "{}_count".format(this_work_type): 1,
+                                       "{}_count".format(other_work_type): 0, "time": time.time()}).run(conn)
                     # Remove from work list
                     if self in wss_work:
                         print_time("Removing {} from wss_work".format(self))
@@ -596,6 +610,7 @@ def push_precache():
                     print_time("Web socket does not exist anymore!!!")
                     wss_precache.remove(work_clients)
                     wss_work.remove(work_clients)
+                    del work_clients
                 else:
                     if work_clients not in wss_work:
                         work_count = work_count + 1
@@ -632,16 +647,33 @@ def precache_update():
     not_up_to_date = 0
     conn = yield connection
     #   print_time("precache_update")
+#    precache_data = yield rethinkdb.db("pow").table("hashes")['account'].distinct().run(conn)
     precache_data = yield rethinkdb.db("pow").table("hashes").run(conn)
     if not precache_data:
         print_time("Failed to retrieve data from DB in precache_update")
         return
+    count_precache = 0
+    precache_data_list = []
+    while (yield precache_data.fetch_next()):
+        item = yield precache_data.next()
+        precache_data_list.append(item)
+        count_precache += 1
 
+    print(count_precache)
+    print(len(precache_data_list))
     # organize DB data efficiently
-    precache_data = precache_data.items
-    account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data}
-    accounts = list(account_to_hash.keys())
+    #precache_data_list = list(precache_data)
+    account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data_list}
+    accounts = []
+    for d in precache_data_list:
+        if d['account'] not in accounts:
+            accounts.append(d['account'])
 
+#    accounts = list(account_to_hash.keys())
+
+    print()
+    print(len(accounts))
+    print()
     '''
     Get frontiers for all accounts in a single RPC call
     - if any account is not correct (wrong checksum), this will return an error - so it should be absolutely avoided
@@ -649,52 +681,56 @@ def precache_update():
     - since it could be simply that the "open account" block was not processed by the service, we will not be deleting open blocks here anymore
     '''
     # TODO if needed, then do a cleanup of wrong blocks every now and then, e.g. every 24h
+    while (len(accounts) > 0):
+        get_frontiers = json.dumps({"action": "accounts_frontiers", "accounts": accounts[:100]})
+        #print(get_frontiers)
+        del accounts[:100]
 
-    get_frontiers = json.dumps({"action": "accounts_frontiers", "accounts": accounts})
-    r = requests.post(rai_node_address, data=get_frontiers)
-    frontiers = r.json()
-    if 'frontiers' not in frontiers:
-        print_time("Error getting account frontiers in precache_update: {}".format(frontiers))
-        return
+        r = requests.post(rai_node_address, data=get_frontiers)
+        frontiers = r.json()
+        if 'frontiers' not in frontiers:
+            print_time("Error getting account frontiers in precache_update: {}".format(frontiers))
+            return
 
-    frontiers = frontiers['frontiers']
+        frontiers = frontiers['frontiers']
 
-    # this code would get the open block mistakes
-    # open_block_mistakes = [a for a in accounts if a not in frontiers]
+        # this code would get the open block mistakes
+        # open_block_mistakes = [a for a in accounts if a not in frontiers]
 
-    for account, frontier in frontiers.items():
-        count_updates += count_updates + 1
+        for account, frontier in frontiers.items():
+            count_updates += 1
 
-        old_hash, work = account_to_hash[account]
-        if old_hash == frontier:
-            up_to_date = up_to_date + 1
-            if old_hash in precache_work_tracker:
-                time_sent = precache_work_tracker[old_hash]
-                if time.time() - time_sent > 1000.0:
-                    # probably client disconnected while doing precache work, we need to queue it again
-                    too_old += 1
-                    precache_work_tracker.pop(time_sent)
-                    hash_to_precache.append(old_hash)
-            else:
-                if work == WorkState.needs.value or work == WorkState.doing.value:
-                    # this was precache work left undone since the last server restart
-                    if old_hash not in hash_to_precache:
-                        hash_to_precache.append(old_hash)
-
-        else:
-            not_up_to_date = not_up_to_date + 1
-            if frontier not in hash_to_precache:
-                hash_to_precache.append(frontier)
+            old_hash, work = account_to_hash[account]
+            if old_hash == frontier:
+                up_to_date += 1
                 if old_hash in precache_work_tracker:
-                    # even if returned, the hash will not be up-to-date, so better remove from tracking and reject it later
-                    precache_work_tracker.pop(old_hash)
+                    time_sent = precache_work_tracker[old_hash]
+                    if time.time() - time_sent > 1000.0:
+                        # probably client disconnected while doing precache work, we need to queue it again
+                        too_old += 1
+                        if time_sent in precache_work_tracker:
+                            precache_work_tracker.pop(time_sent)
+                            hash_to_precache.append(old_hash)
+                else:
+                    if work == WorkState.needs.value or work == WorkState.doing.value:
+                        # this was precache work left undone since the last server restart
+                        if old_hash not in hash_to_precache:
+                            hash_to_precache.append(old_hash)
 
-                    # add to a list of old hashes. since we asked the clients, we should update their count later
-                    old_hashes.append(old_hash)
+            else:
+                not_up_to_date += 1
+                if frontier not in hash_to_precache:
+                    hash_to_precache.append(frontier)
+                    if old_hash in precache_work_tracker:
+                        # even if returned, the hash will not be up-to-date, so better remove from tracking and reject it later
+                        precache_work_tracker.pop(old_hash)
 
-            # update DB
-            yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
-                {"work": WorkState.needs.value, "hash": frontier}).run(conn)
+                        # add to a list of old hashes. since we asked the clients, we should update their count later
+                        old_hashes.append(old_hash)
+
+                # update DB
+                yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
+                     {"work": WorkState.needs.value, "hash": frontier}).run(conn)
 
     print_time("Count: {:d}, No frontier: {:d}, Up to date: {:d}, Too old: {:d}, Not up to date: {:d}".format(
                 count_updates, count_updates-up_to_date, up_to_date, too_old, not_up_to_date))
@@ -776,7 +812,7 @@ if __name__ == "__main__":
     blacklist = build_blacklist('blacklist.txt')
 
     print_time('*** Websocket Server Started at %s***' % myIP)
-    pc = tornado.ioloop.PeriodicCallback(precache_update, 10000)
+    pc = tornado.ioloop.PeriodicCallback(precache_update, 30000)
     pc.start()
     push = tornado.ioloop.PeriodicCallback(push_precache, 5000)
     push.start()
