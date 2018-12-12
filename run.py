@@ -417,7 +417,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 # Setup message handling
 
                 # remove from any lists
-                self.remove_from_lists()
+                self.remove_from_lists(timeout=True)
 
                 # restrict clients per IP
                 connected_clients = get_all_clients()
@@ -558,7 +558,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def on_close(self):
         print_time('Worker disconnected - {}'.format(self.id))
-        self.remove_from_lists()
+        self.remove_from_lists(timeout=True)
 
     def remove_from_lists(self, timeout=False):
         for l in [wss_work, wss_demand, wss_precache]:
