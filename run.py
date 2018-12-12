@@ -444,7 +444,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 if 'hash' not in ws_data or 'work' not in ws_data:
                     raise Exception('Incorrect data from client: {}'.format(ws_data))
 
-                if self not in wss_precache or self not in wss_demand:
+                if self not in wss_precache and self not in wss_demand:
                     self.write_message('{"status": "error", "description": "Must setup first"}')
                     return
 
