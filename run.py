@@ -453,6 +453,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 else:
                     print_time("Work was given for hash {} but this hash was not in any of the work trackers".format(hash_hex))
                     if hash_hex in old_hashes:
+                        conn = yield connection
                         print_time("Hash was an old hash given to this client, we should still increase client count but not update the account entry")
                         clients_data = yield rethinkdb.db("pow").table("clients").filter(
                             rethinkdb.row['account'] == payout_account).nth(0).default(False).run(conn)
@@ -499,9 +500,10 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                             rethinkdb.row['account'] == payout_account).update(
                                 {"count": count + 1, "{}_count".format(this_work_type): count_type + 1, "time": time.time()}).run(conn)
                     else:
+                        other_work_type = 'urgent' if this_work_type == 'precache' else 'precache'
                         yield rethinkdb.db("pow").table("clients").insert(
-                            {"account": payout_account, "count": 1, "{}_count".format(this_work_type): 1, "time": time.time()}).run(conn)
-
+                               {"account": payout_account, "count": 1, "{}_count".format(this_work_type): 1,
+                                       "{}_count".format(other_work_type): 0, "time": time.time()}).run(conn)
                     # Remove from work list
                     if self in wss_work:
                         print_time("Removing {} from wss_work".format(self))
@@ -693,8 +695,9 @@ def precache_update():
                     if time.time() - time_sent > 1000.0:
                         # probably client disconnected while doing precache work, we need to queue it again
                         too_old += 1
-                        precache_work_tracker.pop(time_sent)
-                        hash_to_precache.append(old_hash)
+                        if time_sent in precache_work_tracker:
+                            precache_work_tracker.pop(time_sent)
+                            hash_to_precache.append(old_hash)
                 else:
                     if work == WorkState.needs.value or work == WorkState.doing.value:
                         # this was precache work left undone since the last server restart
