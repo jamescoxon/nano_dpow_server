@@ -708,9 +708,8 @@ def precache_update():
                     if time.time() - time_sent > 1000.0:
                         # probably client disconnected while doing precache work, we need to queue it again
                         too_old += 1
-                        if time_sent in precache_work_tracker:
-                            precache_work_tracker.pop(time_sent)
-                            hash_to_precache.append(old_hash)
+                        precache_work_tracker.pop(old_hash)
+                        hash_to_precache.append(old_hash)
                 else:
                     if work == WorkState.needs.value or work == WorkState.doing.value:
                         # this was precache work left undone since the last server restart
