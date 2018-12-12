@@ -730,8 +730,8 @@ def precache_update():
                 yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
                      {"work": WorkState.needs.value, "hash": frontier}).run(conn)
 
-    print_time("Count: {:d}, No frontier: {:d}, Up to date: {:d}, Too old: {:d}, Not up to date: {:d}".format(
-                count_updates, count_updates-up_to_date, up_to_date, too_old, not_up_to_date))
+    print_time("Count: {:d}, Up to date: {:d}, Too old: {:d}, Not up to date: {:d}".format(
+                count_updates, up_to_date, too_old, not_up_to_date))
 
     print_time_debug("precache_update took: {:.4f} seconds".format(time.time()-t_start))
 
