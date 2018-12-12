@@ -104,7 +104,14 @@ def remove_from_timeout(client):
 
 
 def get_all_clients():
-    return set( wss_demand + wss_precache )
+    clients = set(wss_demand + wss_precache)
+    for client in clients:
+        if not client.ws_connection.stream.socket:
+            print("Removing client, socket is not active: {}".format(client))
+            client.remove_from_lists(timeout=True)
+            clients.remove(client)
+            del client
+    return clients
 
 
 def build_blacklist(filepath='blacklist.txt'):
@@ -167,7 +174,8 @@ class Work(tornado.web.RequestHandler):
         for ws in wss_demand:
             if not ws.ws_connection.stream.socket:
                 print_time("Web socket does not exist anymore!!!")
-                remove_from_lists(ws, timeout=True)
+                ws.remove_from_lists(timeout=True)
+                del ws
             else:
                 if ws not in wss_work and ws not in wss_timeout:
                     ws.write_message(message)
@@ -436,6 +444,10 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 if 'hash' not in ws_data or 'work' not in ws_data:
                     raise Exception('Incorrect data from client: {}'.format(ws_data))
 
+                if self not in wss_precache or self not in wss_demand:
+                    self.write_message('{"status": "error", "description": "Must setup first"}')
+                    return
+
                 # handle work message
                 hash_hex = ws_data['hash'].upper()
                 work = ws_data['work']
@@ -598,6 +610,7 @@ def push_precache():
                     print_time("Web socket does not exist anymore!!!")
                     wss_precache.remove(work_clients)
                     wss_work.remove(work_clients)
+                    del work_clients
                 else:
                     if work_clients not in wss_work:
                         work_count = work_count + 1
