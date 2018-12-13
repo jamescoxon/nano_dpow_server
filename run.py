@@ -381,7 +381,7 @@ class Work(tornado.web.RequestHandler):
 
             # Send to interface
             service_id = service_data['id']
-            interface.pow_update(request_id, service_id, client_id, work_type, multiplier, receive_time, complete_time)
+            interface.pow_update(request_id, service_id, client_id, work_type, multiplier, receive_time, complete_time, new_entry)
 
 
 class WSHandler(tornado.websocket.WebSocketHandler):

@@ -39,7 +39,7 @@ class InterfaceClient(object):
         self.key = key
         return True
 
-    def pow_update(self, request_id, service_id, client_id, pow_type, pow_difficulty, time_req, time_res):
+    def pow_update(self, request_id, service_id, client_id, pow_type, pow_difficulty, time_req, time_res, is_new_account):
         if not self.ready:
             return False
 
@@ -51,7 +51,8 @@ class InterfaceClient(object):
             'pow_type': pow_type,
             'pow_difficulty': pow_difficulty,
             'time_requested': formatted_time(time_req),
-            'time_responded': formatted_time(time_res)
+            'time_responded': formatted_time(time_res),
+            'is_new_account': is_new_account
         })
 
         t = Thread(target=post_js, args=[pow_js, self.server+'pow_update'])
