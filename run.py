@@ -170,16 +170,24 @@ class Work(tornado.web.RequestHandler):
         random.shuffle(wss_demand)
         print_lists(work=1, demand=1, timeout=1)
 
+        # First pass: prioritize on_demand clients only
         for ws in wss_demand:
             if not ws.ws_connection.stream.socket:
                 print_time("Web socket does not exist anymore!!!")
                 ws.remove_from_lists(timeout=True)
                 del ws
             else:
-                if ws not in wss_work and ws not in wss_timeout:
+                if ws not in wss_work and ws not in wss_timeout and ws not in wss_precache:
                     ws.write_message(message)
                     wss_work.append(ws)
                     return ws
+
+        # Second pass: go for on_demand and both
+        for ws in wss_demand:
+            if ws not in wss_work and ws not in wss_timeout:
+                ws.write_message(message)
+                wss_work.append(ws)
+                return ws
 
         # no clients
         return None
