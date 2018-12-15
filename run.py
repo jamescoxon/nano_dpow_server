@@ -109,6 +109,7 @@ def get_all_clients():
     for client in clients:
         if not client.ws_connection.stream.socket:
             print("Removing client, socket is not active: {}".format(client))
+            client.close()
             client.remove_from_lists()
             clients.remove(client)
             del client
@@ -175,6 +176,7 @@ class Work(tornado.web.RequestHandler):
         for ws in wss_demand:
             if not ws.ws_connection.stream.socket:
                 print_time("Web socket does not exist anymore!!!")
+                ws.close()
                 ws.remove_from_lists()
                 del ws
             else:
@@ -633,6 +635,7 @@ def push_precache():
             try:
                 if not work_clients.ws_connection.stream.socket:
                     print_time("Web socket does not exist anymore!!!")
+                    work_clients.close()
                     work_clients.remove_from_lists()
                     del work_clients
                 else:
