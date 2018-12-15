@@ -98,9 +98,10 @@ def print_lists(work=False, demand=False, precache=False, timeout=False):
 
 
 def remove_from_timeout(client):
-    print_time("Removing {} from timeout".format(client))
-    if client in wss_timeout:
-        wss_timeout.remove(client)
+    print_lists(timeout=True)
+    print_time("Removing client {} IP from timeout".format(client))
+    if client.ip in wss_timeout:
+        wss_timeout.remove(client.ip)
 
 
 def get_all_clients():
@@ -108,8 +109,8 @@ def get_all_clients():
     for client in clients:
         if not client.ws_connection.stream.socket:
             print("Removing client, socket is not active: {}".format(client))
-            client.remove_from_lists(timeout=True)
             client.close()
+            client.remove_from_lists()
             clients.remove(client)
             del client
     return clients
@@ -174,11 +175,11 @@ class Work(tornado.web.RequestHandler):
         for ws in wss_demand:
             if not ws.ws_connection.stream.socket:
                 print_time("Web socket does not exist anymore!!!")
-                ws.remove_from_lists(timeout=True)
                 ws.close()
+                ws.remove_from_lists()
                 del ws
             else:
-                if ws not in wss_work and ws not in wss_timeout:
+                if ws not in wss_work and ws.ip not in wss_timeout:
                     ws.write_message(message)
                     wss_work.append(ws)
                     return ws
@@ -212,7 +213,7 @@ class Work(tornado.web.RequestHandler):
                 if wss_timeout and try_count != max_tries:
                     print_lists(timeout=1)
                     removed = wss_timeout.pop(0)
-                    print_time("Trying again after removing the oldest client in wss_timeout: {}".format(removed))
+                    print_time("Trying again after removing the oldest IP in wss_timeout: {}".format(removed))
                     continue
                 else:
                     error = 'no_clients'
@@ -239,7 +240,7 @@ class Work(tornado.web.RequestHandler):
             # Took too long, add to timeout list
             client_to_timeout = send_result
             print_time("Placing {} in timeout for 2 hours".format(client_to_timeout))
-            wss_timeout.append(client_to_timeout)
+            wss_timeout.append(client_to_timeout.ip)
             tornado.ioloop.IOLoop.current().add_timeout(time.time() + 120*60, lambda: remove_from_timeout(client_to_timeout))
 
         if error:
@@ -399,8 +400,8 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         super().__init__(*args, **kwargs)
 
     def __repr__(self):
-        return '{id} ({state})'.format(id=self.id or '?',
-                                       state='timeout' if self in wss_timeout else 'busy' if self in wss_work else 'free')
+        return '{id} ({ip}, {type}, {state})'.format(id=self.id or 'unknown id', ip=self.ip or 'unknown ip', type=self.type or 'unknown type',
+                                       state='timeout' if self.ip in wss_timeout else 'busy' if self in wss_work else 'free')
 
     @staticmethod
     def validate_work(hash_hex, work, threshold):
@@ -431,7 +432,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                 # Setup message handling
 
                 # remove from any lists
-                self.remove_from_lists(timeout=True)
+                self.remove_from_lists()
 
                 # restrict clients per IP
                 connected_clients = get_all_clients()
@@ -579,15 +580,12 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
     def on_close(self):
         print_time('Worker disconnected - {}'.format(self.id))
-        self.remove_from_lists(timeout=True)
+        self.remove_from_lists()
 
-    def remove_from_lists(self, timeout=False):
+    def remove_from_lists(self):
         for l in [wss_work, wss_demand, wss_precache]:
             if self in l:
                 l.remove(self)
-        if timeout:
-            if self in wss_timeout:
-                wss_timeout.remove(self)
 
     def check_origin(self, origin):
         return True
@@ -629,8 +627,8 @@ def push_precache():
             try:
                 if not work_clients.ws_connection.stream.socket:
                     print_time("Web socket does not exist anymore!!!")
-                    work_clients.remove_from_lists(timeout=True)
                     work_clients.close()
+                    work_clients.remove_from_lists()
                     del work_clients
                 else:
                     if work_clients not in wss_work:
