@@ -459,10 +459,10 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     print_time("Found work_type -> {}".format(work_type))
                     try:
                         self.update_work_type(work_type)
-                    #self.write_message('{"status": "success"}')
+                        self.write_message('{"status": "success"}')
                     except Exception as e:
                         print_time(e)
-                    #self.write_message('{"status": "error", "description": "%s"}' % e)
+                        self.write_message('{"status": "error", "description": "%s"}' % e)
             else:
                 if 'hash' not in ws_data or 'work' not in ws_data:
                     raise Exception('Incorrect data from client: {}'.format(ws_data))
