@@ -771,10 +771,12 @@ def update_interface_clients():
     # seen = set()
     # unique_clients_by_account = [c for c in connected_clients if c.address not in seen and not seen.add(c.address)]
     accounts = [c.address for c in connected_clients]
-    data = yield rethinkdb.db("pow").table("clients").filter(rethinkdb.row["account"] in accounts).run(conn)
-
+    accounts_expr = rethinkdb.expr(accounts)
     counts_by_type = dict()
-    for client_data in data.items:
+
+    data = yield rethinkdb.db("pow").table("clients").filter(lambda row: accounts_expr.contains(row["account"])).run(conn)
+    while (yield data.fetch_next()):
+        client_data = yield data.next()
         counts_by_type[client_data["account"]] = {"precache": client_data["precache_count"], "urgent": client_data["urgent_count"]}
 
     clients = list(map(lambda c: {
