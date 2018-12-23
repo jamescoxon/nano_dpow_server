@@ -108,7 +108,7 @@ def get_all_clients():
     clients = set(wss_demand + wss_precache)
     for client in clients:
         if not client.ws_connection.stream.socket:
-            print("Removing client, socket is not active: {}".format(client))
+            print_time("Removing client, socket is not active: {}".format(client))
             client.close()
             client.remove_from_lists()
             clients.remove(client)
@@ -269,7 +269,7 @@ class Work(tornado.web.RequestHandler):
         post_data = json.loads(self.request.body.decode('utf-8'))
         if 'hash' in post_data:
             hash_hex = post_data['hash'].upper()
-        else:
+        elif 'accounts' not in post_data:
             return_json = '{"status" : "no hash"}'
             print_time(return_json)
             self.write(return_json)
@@ -295,6 +295,56 @@ class Work(tornado.web.RequestHandler):
             print_time("no API key")
             return_json = '{"status" : "no key"}'
             print_time(return_json)
+            self.write(return_json)
+            return
+
+        # Are they sending a precache list?
+        if 'accounts' in post_data:
+            accounts_precache = set(post_data['accounts'])
+            print_time("Request to precache for {} accounts".format(len(accounts_precache)))
+
+            # Take out those that are not in DB
+            accounts_in_db = set()
+            accounts_expr = rethinkdb.expr(accounts_precache)
+            accounts_data = yield rethinkdb.db("pow").table("hashes").filter(lambda doc: accounts_expr.contains(doc['account'])).run(conn)
+            while (yield accounts_data.fetch_next()):
+                item = yield accounts_data.next()
+                accounts_in_db.add(item["account"])
+
+            not_in_db = accounts_precache.difference(accounts_in_db)
+            print_time("{} accounts already in DB, adding the other {}".format(len(accounts_in_db), len(not_in_db)))
+
+            # Get the public keys
+            bad_accounts = set()
+            public_keys = dict()
+            for account in not_in_db:
+                get_key = '{ "action" : "account_key", "account" : "%s"}' % account
+                r = requests.post(rai_node_address, data=get_key)
+                r = r.json()
+                if 'error' in r:
+                    # invalid account
+                    bad_accounts.add(account)
+                else:
+                    public_keys[account] = r['key']
+
+            # Filter out the bad accounts
+            filtered_accounts = not_in_db.difference(bad_accounts)
+
+            if bad_accounts:
+                print_time("{} accounts given to precache are not valid:\n{}".format(len(bad_accounts), bad_accounts))
+                print_time("{} were valid".format(len(filtered_accounts)))
+
+            # Add to DB
+            results = yield rethinkdb.db("pow").table("hashes").insert(
+                [{"work": WorkState.needs.value, "hash": public_keys[account], "account": account, "unopened_account": True} for account in filtered_accounts]
+            ).run(conn)
+
+            # Send for precaching
+            hash_to_precache.extend(public_keys.values())
+
+            # Send feedback to service
+            return_json = json.dumps({"added": list(filtered_accounts), "already_tracked": list(accounts_in_db), "bad_accounts": list(bad_accounts)})
+            print_time_debug(return_json)
             self.write(return_json)
             return
 
@@ -370,17 +420,17 @@ class Work(tornado.web.RequestHandler):
 
             if new_entry:
                 yield rethinkdb.db("pow").table("hashes").insert(
-                    {"account": account, "last_worker": client_id, "hash": hash_hex, "work": work_output, "threshold": threshold_str}).run(conn)
+                    {"account": account, "last_worker": client_id, "hash": hash_hex, "work": work_output, "threshold": threshold_str, "unopened_account": False}).run(conn)
             else:
                 yield rethinkdb.db("pow").table("hashes").filter({"account": account}).update(
-                    {"hash": hash_hex, "last_worker": client_id, "work": work_output, "threshold": threshold_str}).run(conn)
+                    {"hash": hash_hex, "last_worker": client_id, "work": work_output, "threshold": threshold_str, "unopened_account": False}).run(conn)
         else:
             if new_entry:
                 yield rethinkdb.db("pow").table("hashes").insert(
-                    {"account": account, "hash": hash_hex, "work": WorkState.needs.value}).run(conn)
+                    {"account": account, "hash": hash_hex, "work": WorkState.needs.value, "unopened_account": False}).run(conn)
             else:
                 yield rethinkdb.db("pow").table("hashes").filter({"account": account}).update(
-                    {"hash": hash_hex, "work": WorkState.needs.value}).run(conn)
+                    {"hash": hash_hex, "work": WorkState.needs.value, "unopened_account": False}).run(conn)
 
 
 
@@ -453,7 +503,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
                 # handle setup message for work type
                 if ws_data['address'] in blacklist:
-                    print("Blacklisted: {}".format(ws_data['address']))
+                    print_time("Blacklisted: {}".format(ws_data['address']))
                 else:
                     work_type = ws_data['work_type']
                     print_time("Found work_type -> {}".format(work_type))
@@ -507,7 +557,6 @@ class WSHandler(tornado.websocket.WebSocketHandler):
                     threshold_str = data.get("threshold") or nano.threshold_to_str(nano.NANO_DIFFICULTY)
                 else:
                     threshold_str = nano.threshold_to_str(nano.NANO_DIFFICULTY)
-                print_time_debug("Validating hash {},  work {}, threshold {}".format(hash_hex, work, threshold_str))
 
                 # validate the work from client
                 valid = self.validate_work(hash_hex, work, threshold_str)
@@ -524,7 +573,7 @@ class WSHandler(tornado.websocket.WebSocketHandler):
 
                         # Update DB here directly
                         yield rethinkdb.db("pow").table("hashes").filter({"hash": hash_hex}).update(
-                            {"work": work, "threshold": threshold_str, "last_worker": payout_account}).run(conn)
+                            {"work": work, "threshold": threshold_str, "last_worker": payout_account, "unopened_account": False}).run(conn)
 
                     # Add work record to client database to allow payouts
                     clients_data = yield rethinkdb.db("pow").table("clients").filter(
@@ -643,7 +692,6 @@ def push_precache():
                         work_count = work_count + 1
                         message = '{"hash" : "%s", "type" : "precache", "threshold" : "%s"}' % (hash_hex, threshold_str)
                         work_clients.write_message(message)
-                        print_time_debug(message)
                         wss_work.append(work_clients)
                         hash_to_precache.remove(hash_hex)
                         precache_work_tracker[hash_hex] = time.time()
@@ -695,8 +743,6 @@ def precache_update():
     for d in precache_data_list:
         if d['account'] not in accounts:
             accounts.append(d['account'])
-
-#    accounts = list(account_to_hash.keys())
 
     print()
     print(len(accounts))
@@ -756,7 +802,7 @@ def precache_update():
 
 
                     yield rethinkdb.db("pow").table("hashes").filter(rethinkdb.row['account'] == account).update(
-                        {"work": WorkState.needs.value, "hash": frontier}).run(conn)
+                        {"work": WorkState.needs.value, "hash": frontier, "unopened_account": False}).run(conn)
 
     print_time("Count: {:d}, Up to date: {:d}, Too old: {:d}, Not up to date: {:d}".format(
                 count_updates, up_to_date, too_old, not_up_to_date))
@@ -788,6 +834,7 @@ def update_interface_clients():
     interface.clients_update(clients)
     print_time_debug("Updated interface clients")
 
+
 @gen.coroutine
 def update_interface_services():
     conn = yield connection
@@ -803,6 +850,19 @@ def update_interface_services():
         print_time_debug("Updated interface services")
     else:
         print_time_debug("Could not update interface services")
+
+@gen.coroutine
+def initial_db_update():
+    conn = yield connection
+    unopened_data = yield rethinkdb.db("pow").table("hashes").filter({"unopened_account": True, "work": WorkState.needs.value}).run(conn)
+    unopened_accounts = set()
+    while (yield unopened_data.fetch_next()):
+        item = yield unopened_data.next()
+        unopened_accounts.add(item['hash'])
+    if unopened_accounts:
+        print_time("Adding {} unopened accounts to precache".format(len(unopened_accounts)))
+        hash_to_precache.extend(unopened_accounts)
+    print_time("Initial DB update done")
 
 
 if __name__ == "__main__":
@@ -820,6 +880,9 @@ if __name__ == "__main__":
             print_time('Interface is setup -> {}'.format(interface.server))
     else:
         interface = None
+
+    # initial DB check
+    tornado.ioloop.IOLoop.current().run_sync(initial_db_update)
 
     blacklist = build_blacklist('blacklist.txt')
 
