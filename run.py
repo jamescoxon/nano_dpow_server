@@ -735,7 +735,7 @@ def precache_update():
         item = yield precache_data.next()
         account = item['account']
         if account not in account_to_hash:
-            account_to_hash[item['account']] = (item['hash'], item['work'])
+            account_to_hash[account] = (item['hash'], item['work'])
             count_unique += 1
         count_all += 1
 
