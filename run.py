@@ -727,26 +727,21 @@ def precache_update():
     if not precache_data:
         print_time("Failed to retrieve data from DB in precache_update")
         return
-    count_precache = 0
-    precache_data_list = []
+
+    count_unique = 0
+    count_all = 0
+    account_to_hash = dict()
     while (yield precache_data.fetch_next()):
         item = yield precache_data.next()
-        precache_data_list.append(item)
-        count_precache += 1
+        account = item['account']
+        if account not in account_to_hash:
+            account_to_hash[item['account']] = (item['hash'], item['work'])
+            count_unique += 1
+        count_all += 1
 
-    print(count_precache)
-    print(len(precache_data_list))
-    # organize DB data efficiently
-    #precache_data_list = list(precache_data)
-    account_to_hash = {d['account']: (d['hash'], d['work']) for d in precache_data_list}
-    accounts = []
-    for d in precache_data_list:
-        if d['account'] not in accounts:
-            accounts.append(d['account'])
+    accounts = list(account_to_hash.keys())
+    print('Total {}, unique {}, duplicate: {}'.format(count_all, count_unique, count_all-count_unique))
 
-    print()
-    print(len(accounts))
-    print()
     '''
     Get frontiers for all accounts in a single RPC call
     - if any account is not correct (wrong checksum), this will return an error - so it should be absolutely avoided
@@ -754,10 +749,8 @@ def precache_update():
     - since it could be simply that the "open account" block was not processed by the service, we will not be deleting open blocks here anymore
     '''
     # TODO if needed, then do a cleanup of wrong blocks every now and then, e.g. every 24h
-    while (len(accounts) > 0):
-        get_frontiers = json.dumps({"action": "accounts_frontiers", "accounts": accounts[:100]})
-        #print(get_frontiers)
-        del accounts[:100]
+    for i in range(0, len(accounts), 100):
+        get_frontiers = json.dumps({"action": "accounts_frontiers", "accounts": accounts[i:i+99]})
 
         r = requests.post(rai_node_address, data=get_frontiers)
         frontiers = r.json()
