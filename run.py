@@ -759,6 +759,7 @@ def precache_update():
             return
 
         frontiers = frontiers['frontiers']
+        if type(frontiers) == str:    continue
 
         # this code would get the open block mistakes
         # open_block_mistakes = [a for a in accounts if a not in frontiers]

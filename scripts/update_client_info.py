@@ -2,7 +2,7 @@ import rethinkdb as r
 
 clients = [
     # username,             public,     display name,           website (without https)
-    ('username1',           True,       'User 1',               'www.User1Website'),
+    ('speedtest',           True,       'NanoSpeed.live',               'www.nanospeed.live'),
 ]
 
 conn = r.connect("localhost", 28015)
