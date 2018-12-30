@@ -823,8 +823,8 @@ def update_interface_clients():
         'client_id': c.address+'_'+c.type,
         'client_address': c.address,
         'client_type': c.type,
-        'client_demand_count': counts_by_type[c.address]["urgent"],
-        'client_precache_count': counts_by_type[c.address]["precache"]
+        'client_demand_count': counts_by_type[c.address]["urgent"] if c.address in counts_by_type else 0,
+        'client_precache_count': counts_by_type[c.address]["precache"] if c.address in counts_by_type else 0
     }, connected_clients))
 
     interface.clients_update(clients)
